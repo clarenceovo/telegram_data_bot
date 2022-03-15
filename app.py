@@ -1,6 +1,7 @@
 import logging
 import json
 import io
+import os
 import pandas as pd
 import seaborn as sns
 from  IGDataSnapshotter.IGDataSnapshotter import IGDataSnapshotter
@@ -19,11 +20,11 @@ logger.setLevel(logging.INFO)
 
 class financial_data_bot:
     def __init__(self):
-        self.__config = json.load(open('config/config.json'))
+        self.__config = json.load(open(os.path.join(os.getcwd(),'config/config.json')))
         self.__api = "http://"+self.__config['api_endpoint']
         self.__image_buffer = io.BytesIO()
         self.__ig_credential = self.__config['ig_credential']
-        self.__ticker=json.load(open("config/ticker.json"))
+        self.__ticker=json.load(open(os.path.join(os.getcwd(),"config/ticker.json")))
         if self.__config is not None:
             logger.info("Loaded configuration successfully")
         self.updater = Updater(self.__config['telegram_token'])

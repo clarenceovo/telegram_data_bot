@@ -28,9 +28,8 @@ class financial_data_bot:
         if self.__config is not None:
             logger.info("Loaded configuration successfully")
         self.updater = Updater(self.__config['telegram_token'])
-        self.__ig_conn = IGDataSnapshotter(self.__ig_credential['identifier'], self.__ig_credential['password'],
-                                         self.__ig_credential['api_key'])
-
+        #self.__ig_conn = IGDataSnapshotter(self.__ig_credential['identifier'], self.__ig_credential['password'],self.__ig_credential['api_key'])
+        #Disable IG Quote
         self.__ig_quote = {}
         self.__ig_quote_ts = 0
 
@@ -40,14 +39,19 @@ class financial_data_bot:
     def _help(self, update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
         msg = """Command :
-/gethkshortselling <ticker> <session> 
-(eg: /gethkshortselling 2800 AM) 
+/hkshortvol <ticker> <session> 
+(eg: /hkshortvol 2800 AM) 
 AM: Morning Session PM:Whole Trading Day
+It returns a chart with 21 days shortselling data
 
-/getcryptoopeninterest <ticker> 
-(eg: /getcryptoopeninterest SOL-PERP)
+/cryptooi <ticker> 
+(eg: /cryptooi SOL-PERP)
+It returns a chart with 21 days open interest data of the ticker
 
-/igmarket 
+/hsioi 
+It returns 30 Days HSI future open interest data 
+
+/igmarket (Currently Disable :( )
 Get the live IG Market Price
         """
         update.message.reply_text(msg)
@@ -65,7 +69,9 @@ Get the live IG Market Price
 
     def _get_crypto_open_interest(self,update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
-        cmd = update.message.text.split("/getcryptoopeninterest")[1].split(' ')
+        cmd = update.message.text.split("/cryptooi")[1].split(' ')
+        if len(cmd)==0:
+            return
         cmd.remove('')
         if len(cmd)==0:
             return
@@ -94,20 +100,52 @@ Get the live IG Market Price
                 open_interest_plt = sns.lineplot(data=data, x=data.index, y="open_interest",ax=axs[0])
                 price_plt =sns.lineplot(data=data, x=data.index, y="price",ax=axs[1])
                 buffer = io.BytesIO()
+                plt.title(f'{ticker} OI@{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
                 plt.savefig(buffer,format='jpeg')
                 update.message.reply_photo(photo=buffer.getvalue())
                 buffer.close()
 
+    def _get_hsi_future_open_interest(self,update: Update, context: CallbackContext) -> None:
+        self.__on_trigger(update)
+        buffer = io.BytesIO()
+        ret = requests.get(self.__api + "/equity/HK/getHSIFutureOI")
+        if ret.status_code == 200:
+            data = pd.DataFrame(ret.json()['data'])
+            data['date'] = pd.to_datetime(data['date']).dt.date
+            fig, ax = plt.subplots()
+            ax.plot(data['date'],data['current_price'], color="blue")
+            ax.set_xlabel("Date", fontsize=12)
+            ax.set_ylabel("Future Settlement Price", fontsize=12)
+            ax2 = ax.twinx()
+            ax2.plot(data['date'],data['open_interest'],'--',color="red")
+            ax2.set_ylabel("Open Interest", fontsize=12)
+            plt.title("HSI Future Open Interest")
+            plt.gcf().autofmt_xdate()
+            plt.savefig(buffer, format='jpeg')
+            ##For analytic caption
+            data['price_change'] = data['current_price'] - data['current_price'].shift(1)
+            data['oi_change']= data['open_interest'] - data['open_interest'].shift(1)
+            ret = data[['date','current_price','price_change','oi_change']]
+            ret = ret[ret['date'] > (date.today() - timedelta(days=21))]
+            #print(ret)
+            ret_str = f'Last 21 Days HSI Future OI Change\n' \
+                      f'      Date       Price    Change  OI Change\n' \
+                      f'{ret.to_string(index=False,header=False)}'
+
+            update.message.reply_photo(photo=buffer.getvalue(),caption=ret_str)
+            #update.message.reply_text(ret.to_string(index=False))
+
 
     def _get_HK_open_interest(self,update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
+        buffer = io.BytesIO()
         """
 
         :param stock_code:
         :param session:
 
         """
-        cmd = update.message.text.split("/gethkshortselling")[1].split(' ')
+        cmd = update.message.text.split("/hkshortvol")[1].split(' ')
         cmd.remove('')
         if len(cmd)>0:
             if len(cmd)==1:
@@ -132,7 +170,6 @@ Get the live IG Market Price
                 data['datetime']=pd.to_datetime(data['date'])
                 #Past 14 Days data
                 data = data[data['date']>(date.today()-timedelta(days=21))]
-                buffer =  io.BytesIO()
                 data['date'] = data.apply(lambda x:x['date'].strftime("%Y/%m/%d"),axis=1)
                 data = data.set_index("datetime")
                 fig, ax = plt.subplots()
@@ -192,12 +229,20 @@ Get the live IG Market Price
             self.__ig_quote_ts =datetime.now().timestamp()
 
 
+    def __serive_unavailable(self,update: Update, context: CallbackContext) -> None:
+        update.message.reply_text("Sorry. This service is not available at the moment.\n"
+                                  "It will be back soon :)")
+
+
+
     def run(self):
         logger.info(f"Bot starts at:{datetime.now().strftime('%Y/%m/%d %H:%M:%S')}")
         self.dispatcher = self.updater.dispatcher
-        self.dispatcher.add_handler(CommandHandler("gethkshortselling", self._get_HK_open_interest))
-        self.dispatcher.add_handler(CommandHandler("getcryptoopeninterest", self._get_crypto_open_interest))
-        self.dispatcher.add_handler(CommandHandler("igmarket", self._ig_market))
+        self.dispatcher.add_handler(CommandHandler("hkshortvol", self._get_HK_open_interest))
+        self.dispatcher.add_handler(CommandHandler("cryptooi", self._get_crypto_open_interest))
+        self.dispatcher.add_handler(CommandHandler("hsioi", self._get_hsi_future_open_interest))
+        #self.dispatcher.add_handler(CommandHandler("igmarket", self._ig_market))
+        self.dispatcher.add_handler(CommandHandler("igmarket", self.__serive_unavailable))
         self.dispatcher.add_handler(CommandHandler("help", self._help))
         self.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, self._general_query))
         #logger.info(f"Bot starts at:{datetime.now().strftime('%Y/%m/%d %H:%M:%S')}")

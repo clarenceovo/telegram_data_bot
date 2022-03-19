@@ -112,6 +112,7 @@ Get the live IG Market Price
         if ret.status_code == 200:
             data = pd.DataFrame(ret.json()['data'])
             data['date'] = pd.to_datetime(data['date']).dt.date
+            data = data[data['date'] > (date.today() - timedelta(days=60))]
             fig, ax = plt.subplots()
             ax.plot(data['date'],data['current_price'], color="blue")
             ax.set_xlabel("Date", fontsize=12)
@@ -119,7 +120,7 @@ Get the live IG Market Price
             ax2 = ax.twinx()
             ax2.plot(data['date'],data['open_interest'],'--',color="red")
             ax2.set_ylabel("Open Interest", fontsize=12)
-            plt.title("HSI Future Open Interest")
+            plt.title("HSI Future Open Interest (Last 60 Days")
             plt.gcf().autofmt_xdate()
             plt.savefig(buffer, format='jpeg')
             ##For analytic caption

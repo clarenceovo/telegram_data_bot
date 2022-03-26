@@ -56,6 +56,9 @@ It returns a chart with 21 days open interest data of the ticker
 /hsioi 
 It returns 30 Days HSI future open interest data 
 
+/hkstockoi <ticker>
+It returns the latest stock option OI change of a stock
+
 /igmarket (Currently Disable :( )
 Get the live IG Market Price
         """

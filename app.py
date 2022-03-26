@@ -4,6 +4,10 @@ import io
 import os
 import pandas as pd
 import seaborn as sns
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
+from api_data_service.api import data_service
 from  IGDataSnapshotter.IGDataSnapshotter import IGDataSnapshotter
 from datetime import datetime , date,timedelta
 import matplotlib
@@ -22,6 +26,7 @@ class financial_data_bot:
     def __init__(self):
         self.__config = json.load(open(os.path.join(os.getcwd(),'config/config.json')))
         self.__api = "http://"+self.__config['api_endpoint']
+        self.__data_service = data_service()
         self.__image_buffer = io.BytesIO()
         self.__ig_credential = self.__config['ig_credential']
         self.__ticker=json.load(open(os.path.join(os.getcwd(),"config/ticker.json")))
@@ -55,7 +60,12 @@ It returns 30 Days HSI future open interest data
 Get the live IG Market Price
         """
         update.message.reply_text(msg)
-
+    def __get_contract_month(self):
+        current = datetime.now()
+        forward = datetime.now() + timedelta(days=28)
+        forward = forward.strftime("%Y-%m-01")
+        current = current.strftime("%Y-%m-01")
+        return (current,forward)
 
     def __on_trigger(self,update: Update):
         chat_history = update.message.chat
@@ -66,7 +76,52 @@ Get the live IG Market Price
         time= datetime.now().strftime('%Y/%m/%d %H:%M:%S')
         logger.info(f"User:{user_name};ID:{id};Time:{time}")
 
+    def __get_ret_string(self,dt:pd.DataFrame):
+        record = dt.to
+        print(record)
 
+
+    def _get_stock_option_oi(self,update: Update, context: CallbackContext) -> None:
+        self.__on_trigger(update)
+        cmd = update.message.text.split("/hkstockoi")[1].split(' ')
+        cmd.remove('')
+        if len(cmd)==0:
+            update.message.reply_text("Wrong Command Parameter. Please input the ticker")
+            return
+        ticker = cmd[0]
+        if ticker is not None:
+            month = self.__get_contract_month()[0]
+            end = datetime.utcnow()+timedelta(hours=8)
+            end_str = end.strftime("%Y-%m-%d")
+            start_str =  end - timedelta(days=7)
+            start_str=start_str.strftime("%Y-%m-%d")
+            ret = self.__data_service.get_stock_option_oi_by_ticker(ticker=ticker,month=month,start=start_str,end=end_str)
+            ret['date'] = pd.to_datetime(ret['date'])
+            last_record_date = ret['date'].max() #last record date
+            ret = ret.query(f'date =="{last_record_date}"')
+            #ret['price_delta'] = ret.apply(lambda x: int(x['strike']) - price_settle, axis=1)
+            ret['oi_delta_abs'] = ret.apply(lambda x: abs(int(x['oi_change'])), axis=1)
+            call_df = ret.query("type == 'C'")
+            call_df = call_df.sort_values(by=["open_interest"],ascending=False)
+            put_df = ret.query("type == 'P'")
+            put_df = put_df.sort_values(by=["open_interest"],ascending=False)
+            call_ret = call_df[['strike','close',"open_interest",'implied_vol','oi_change']][:10]
+            put_ret = put_df[['strike', 'close', "open_interest", 'implied_vol', 'oi_change']][:10]
+            call_ret.columns = ['strike','close',"OI_EOD",'impl_vol','oi_delta']
+            put_ret.columns = ['strike','close',"OI_EOD",'impl_vol','oi_delta']
+            #call_str = self.__get_ret_string(call_ret)
+            #put_str = self.__get_ret_string(put_ret)
+            ret=f"""
+Ticker:{ticker} Option OI Change @{last_record_date.strftime('%Y/%m/%d')}
+CALL OI 
+-----------
+{call_ret.to_string(index=False,header=True,col_space=6)}
+
+PUT  OI 
+-----------
+{put_ret.to_string(index=False,header=True,col_space=6)}
+"""
+            update.message.reply_text(ret)
     def _get_crypto_open_interest(self,update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
         cmd = update.message.text.split("/cryptooi")[1].split(' ')
@@ -178,6 +233,7 @@ Get the live IG Market Price
                 ax.set_xlabel("Date", fontsize=12)
                 ax.set_ylabel("Number of Shares", fontsize=12)
                 #sns_plot = sns.lineplot(data=data , x=data.index,y="turnover",ax=axs[0])
+                plt.gcf().autofmt_xdate()
                 plt.savefig(buffer,format='jpeg')
                 data['turnover']= data.apply(lambda x:"$"+f"{x['turnover']:,}",axis=1)
                 data['shares']= data.apply(lambda x:' '+f"{x['shares']:,}"+' ',axis=1)
@@ -239,6 +295,8 @@ Get the live IG Market Price
     def run(self):
         logger.info(f"Bot starts at:{datetime.now().strftime('%Y/%m/%d %H:%M:%S')}")
         self.dispatcher = self.updater.dispatcher
+
+        self.dispatcher.add_handler(CommandHandler("hkstockoi", self._get_stock_option_oi))
         self.dispatcher.add_handler(CommandHandler("hkshortvol", self._get_HK_open_interest))
         self.dispatcher.add_handler(CommandHandler("cryptooi", self._get_crypto_open_interest))
         self.dispatcher.add_handler(CommandHandler("hsioi", self._get_hsi_future_open_interest))

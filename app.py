@@ -56,8 +56,9 @@ It returns a chart with 21 days open interest data of the ticker
 /hsioi 
 It returns 30 Days HSI future open interest data 
 
-/hkstockoi <ticker>
+/hkstockoi <ticker> <mode>
 It returns the latest stock option OI change of a stock
+<mode> :type 'c2' to next the next forward option 
 
 /igmarket (Currently Disable :( )
 Get the live IG Market Price
@@ -92,8 +93,16 @@ Get the live IG Market Price
             update.message.reply_text("Wrong Command Parameter. Please input the ticker")
             return
         ticker = cmd[0]
+        if len(cmd)>1:
+            mode = cmd[1] #C2
+        else:
+            mode = 'c1'
         if ticker is not None:
-            month = self.__get_contract_month()[0]
+            if mode == 'c2':
+                month = self.__get_contract_month()[1]
+            else:
+                month = self.__get_contract_month()[0]
+
             end = datetime.utcnow()+timedelta(hours=8)
             end_str = end.strftime("%Y-%m-%d")
             start_str =  end - timedelta(days=7)
@@ -105,24 +114,24 @@ Get the live IG Market Price
             #ret['price_delta'] = ret.apply(lambda x: int(x['strike']) - price_settle, axis=1)
             ret['oi_delta_abs'] = ret.apply(lambda x: abs(int(x['oi_change'])), axis=1)
             call_df = ret.query("type == 'C'")
-            call_df = call_df.sort_values(by=["open_interest"],ascending=False)
+            call_df = call_df.sort_values(by=["oi_delta_abs","open_interest"],ascending=False)
             put_df = ret.query("type == 'P'")
-            put_df = put_df.sort_values(by=["open_interest"],ascending=False)
+            put_df = put_df.sort_values(by=["oi_delta_abs","open_interest"],ascending=False)
             call_ret = call_df[['strike','close',"open_interest",'implied_vol','oi_change']][:10]
             put_ret = put_df[['strike', 'close', "open_interest", 'implied_vol', 'oi_change']][:10]
-            call_ret.columns = ['strike','close',"OI_EOD",'impl_vol','oi_delta']
-            put_ret.columns = ['strike','close',"OI_EOD",'impl_vol','oi_delta']
+            call_ret.columns = ['strike','close',"OI",'IV','oi_delta']
+            put_ret.columns = ['strike','close',"OI",'IV','oi_delta']
             #call_str = self.__get_ret_string(call_ret)
             #put_str = self.__get_ret_string(put_ret)
             ret=f"""
 Ticker:{ticker} Option OI Change @{last_record_date.strftime('%Y/%m/%d')}
 CALL OI 
 -----------
-{call_ret.to_string(index=False,header=True,col_space=6)}
+{call_ret.to_string(index=False,header=True,col_space=8)}
 
 PUT  OI 
 -----------
-{put_ret.to_string(index=False,header=True,col_space=6)}
+{put_ret.to_string(index=False,header=True,col_space=8)}
 """
             update.message.reply_text(ret)
     def _get_crypto_open_interest(self,update: Update, context: CallbackContext) -> None:

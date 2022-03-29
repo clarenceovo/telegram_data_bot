@@ -80,6 +80,12 @@ Get the live IG Market Price
         time= datetime.now().strftime('%Y/%m/%d %H:%M:%S')
         logger.info(f"User:{user_name};ID:{id};Time:{time}")
 
+    def __get_chart_limit(self,df_col):
+        print(df_col)
+        max = df_col.max()
+        max = max*1.1
+        print(f'MAX :{max}')
+        return max if max % 100 == 0 else max + 100 - max % 100
 
     def _get_stock_option_oi(self,update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
@@ -112,10 +118,13 @@ Get the live IG Market Price
             call_df = chart_df.query("type == 'C'")
             put_df = chart_df.query("type == 'P'")
             fig = plt.figure()
+            limit = self.__get_chart_limit(chart_df['open_interest'])
             axe2 = plt.subplot(122)
             axe2.barh(put_df['strike'], put_df['open_interest'], align='center', color='red')
             axe2.set_title("PUT")
+            axe2.set_xlim(0, limit)
             axe1 = plt.subplot(121, sharey=axe2)
+            axe1.set_xlim(0,limit)
             axe1.barh(call_df['strike'], call_df['open_interest'], align='center', color='green')
             axe1.set_title("CALL")
             axe1.invert_xaxis()

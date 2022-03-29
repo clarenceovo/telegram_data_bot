@@ -80,13 +80,10 @@ Get the live IG Market Price
         time= datetime.now().strftime('%Y/%m/%d %H:%M:%S')
         logger.info(f"User:{user_name};ID:{id};Time:{time}")
 
-    def __get_ret_string(self,dt:pd.DataFrame):
-        record = dt.to
-        print(record)
-
 
     def _get_stock_option_oi(self,update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
+        buffer = io.BytesIO()
         cmd = update.message.text.split("/hkstockoi")[1].split(' ')
         cmd.remove('')
         if len(cmd)==0:
@@ -111,18 +108,31 @@ Get the live IG Market Price
             ret['date'] = pd.to_datetime(ret['date'])
             last_record_date = ret['date'].max() #last record date
             ret = ret.query(f'date =="{last_record_date}"')
+            chart_df = ret.copy()
+            call_df = chart_df.query("type == 'C'")
+            put_df = chart_df.query("type == 'P'")
+            fig = plt.figure()
+            axe2 = plt.subplot(122)
+            axe2.barh(put_df['strike'], put_df['open_interest'], align='center', color='red')
+            axe1 = plt.subplot(121, sharey=axe2)
+            axe1.barh(call_df['strike'], call_df['open_interest'], align='center', color='green')
+            axe1.invert_xaxis()
+            plt.ylabel("Strike")
+            plt.suptitle(f"Open Interest@{last_record_date.strftime('%Y/%m/%d')} Option Month:{month[:7]}", size=12)
+            plt.savefig(buffer, format='jpeg')
+
             #ret['price_delta'] = ret.apply(lambda x: int(x['strike']) - price_settle, axis=1)
             ret['oi_delta_abs'] = ret.apply(lambda x: abs(int(x['oi_change'])), axis=1)
             call_df = ret.query("type == 'C'")
             call_df = call_df.sort_values(by=["oi_delta_abs","open_interest"],ascending=False)
             put_df = ret.query("type == 'P'")
             put_df = put_df.sort_values(by=["oi_delta_abs","open_interest"],ascending=False)
-            call_ret = call_df[['strike','close',"open_interest",'implied_vol','oi_change']][:10]
-            put_ret = put_df[['strike', 'close', "open_interest", 'implied_vol', 'oi_change']][:10]
+            call_ret = call_df[['strike','close',"open_interest",'implied_vol','oi_change']][:7]
+            put_ret = put_df[['strike', 'close', "open_interest", 'implied_vol', 'oi_change']][:7]
             call_ret.columns = ['strike','close',"OI",'IV','oi_delta']
             put_ret.columns = ['strike','close',"OI",'IV','oi_delta']
-            #call_str = self.__get_ret_string(call_ret)
-            #put_str = self.__get_ret_string(put_ret)
+
+
             ret=f"""
 Ticker:{ticker} Option OI Change @{last_record_date.strftime('%Y/%m/%d')}
 CALL OI 
@@ -133,7 +143,8 @@ PUT  OI
 -----------
 {put_ret.to_string(index=False,header=True,col_space=8)}
 """
-            update.message.reply_text(ret)
+            update.message.reply_photo(photo=buffer.getvalue(), caption=ret)
+            #update.message.reply_text(ret)
     def _get_crypto_open_interest(self,update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
         cmd = update.message.text.split("/cryptooi")[1].split(' ')
@@ -189,6 +200,7 @@ PUT  OI
             ax2.set_ylabel("Open Interest", fontsize=12)
             plt.title("HSI Future Open Interest (Last 60 Days)")
             plt.gcf().autofmt_xdate()
+
             plt.savefig(buffer, format='jpeg')
             ##For analytic caption
             data['price_change'] = data['current_price'] - data['current_price'].shift(1)
@@ -237,8 +249,8 @@ PUT  OI
                 data['date'] = pd.to_datetime(data['date']).dt.date
                 data['datetime']=pd.to_datetime(data['date'])
                 #Past 14 Days data
-                data = data[data['date']>(date.today()-timedelta(days=21))]
-                data['date'] = data.apply(lambda x:x['date'].strftime("%Y/%m/%d"),axis=1)
+                data = data[data['date']>(date.today()-timedelta(days=60))]
+                data['date'] = data.apply(lambda x:x['date'].strftime("%m/%d"),axis=1)
                 data = data.set_index("datetime")
                 fig, ax = plt.subplots()
                 ax.plot(data.index,data['shares'])
@@ -247,10 +259,13 @@ PUT  OI
                 #sns_plot = sns.lineplot(data=data , x=data.index,y="turnover",ax=axs[0])
                 plt.gcf().autofmt_xdate()
                 plt.savefig(buffer,format='jpeg')
-                data['turnover']= data.apply(lambda x:"$"+f"{x['turnover']:,}",axis=1)
-                data['shares']= data.apply(lambda x:' '+f"{x['shares']:,}"+' ',axis=1)
-                data.columns=['Date  ',"Shares ",'Turnover($HKD)']
-                ret_text = data.to_string(index=False)
+                print(data)
+                ret_df = data.tail(14)
+                print(ret_df)
+                ret_df['turnover']= ret_df.apply(lambda x:"$"+f"{x['turnover']:,}",axis=1)
+                ret_df['shares']= ret_df.apply(lambda x:' '+f"{x['shares']:,}"+' ',axis=1)
+                ret_df.columns=[' Date  ',"Shares ",'Turnover($HKD)']
+                ret_text = ret_df.to_string(index=False)
                 #update.message.reply_text(ret_text)
                 update.message.reply_photo(photo=buffer.getvalue(),caption=ret_text)
                 buffer.close()

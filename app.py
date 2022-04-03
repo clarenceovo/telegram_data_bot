@@ -111,7 +111,6 @@ Get the live IG Market Price
             start_str =  end - timedelta(days=7)
             start_str=start_str.strftime("%Y-%m-%d")
             ret = self.__data_service.get_stock_option_oi_by_ticker(ticker=ticker,month=month,start=start_str,end=end_str)
-            ret['date'] = pd.to_datetime(ret['date'])
             last_record_date = ret['date'].max() #last record date
             ret = ret.query(f'date =="{last_record_date}"')
             chart_df = ret.copy()
@@ -165,8 +164,9 @@ PUT  OI
         if len(cmd)==0:
             return
         ticker = cmd[0]
-        end = date.today().strftime('%Y-%m-%d')
-        start =date.today()-timedelta(days=21)
+        end = datetime.now() + timedelta(hours=8)
+        end = end.strftime('%Y-%m-%d')
+        start =datetime.now() + timedelta(hours=8)-timedelta(days=14)
         start =start.strftime('%Y-%m-%d')
         if ticker is not None:
             ret = requests.get(self.__api + "/crypto/customTimeRangeOpenInterest", params={
@@ -182,11 +182,13 @@ PUT  OI
                 data = pd.DataFrame(ret.json()['data'])
                 data=data[['datetime','price','open_interest']]
                 data['datetime'] = pd.to_datetime(data['datetime'])
+                data=data.drop_duplicates(subset='datetime', keep="last")
                 data = data.set_index('datetime')
                 f, axs = plt.subplots(2, 1,
                                       figsize=(18,10),
                                       sharey=False)
                 open_interest_plt = sns.lineplot(data=data, x=data.index, y="open_interest",ax=axs[0])
+
                 price_plt =sns.lineplot(data=data, x=data.index, y="price",ax=axs[1])
                 buffer = io.BytesIO()
                 plt.title(f'{ticker} OI@{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')

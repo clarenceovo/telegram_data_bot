@@ -59,12 +59,18 @@ class financial_data_bot:
         #df['UPDATE_TIME']=df.apply(lambda x:x.strftime('%Y/%m/%d %H:%M:%S'),axis=1)
         ret = df[['LAST']]
         ret['LAST']= ret.apply(lambda x:float(x['LAST'].strip('%')),axis=1)
-        limit = int(ret['LAST'].max()*1.5)
+        #Remove ST
+        ret.drop(['US3M','US6M'],axis=0,inplace=True)
+        time_range=time_range[2:]
+        #Remove ST
+        upper_limit = int(ret['LAST'].max()*1.2)
+        lower_limt = ret['LAST'].min()*0.8
         #ax.set_xlim(0, limit)
         plt.plot(time_range, ret['LAST'], color="blue")
         plt.gcf().autofmt_xdate()
         plt.title(f"UST Yield Curve", size=12)
-        plt.ylim([0, limit])
+
+        plt.ylim([lower_limt, upper_limit])
         plt.savefig(buffer, format='jpeg')
         msg = ret.to_string(index=True,header=False)
         ret=ret.to_dict()['LAST']

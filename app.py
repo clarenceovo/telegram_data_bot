@@ -40,7 +40,38 @@ class financial_data_bot:
 
 
 
+    def _get_yield_curve_chart(self, update: Update, context: CallbackContext) -> None:
+        self.__on_trigger(update)
+        buffer = io.BytesIO()
+        custom_dict = {"US3M":0,"US6M":1,"US9M":2,'US1Y': 3, 'US2Y': 4, 'US5Y': 5,'US10Y':6,"US20Y":7,"US30Y":8}
+        res = self.__data_service.get_yield()
+        data_dict = {}
+        for symbol ,item in res:
+            data_dict[symbol]=[item.update_time,item.open,item.high,item.low,item.last,item.prev_close]
+        df = pd.DataFrame.from_dict(data_dict,orient='index')
+        df.columns = ['UPDATE_TIME','OPEN','HIGH','LOW','LAST','PREV_CLOSE']
+        df['sort']=df.index
+        df['UPDATE_TIME'] = pd.to_datetime(df['UPDATE_TIME'],format='%Y-%m-%dT%H:%M:%S.%f%z')
+        df = df.sort_index(key=lambda x:x.map(custom_dict))
+        tdy = datetime.now()
+        time_range= [tdy+timedelta(days=30*3),tdy+timedelta(days=30*6),tdy+timedelta(days=365),tdy+timedelta(days=365*2),
+                     tdy+timedelta(days=365*5),tdy+timedelta(days=365*10),tdy+timedelta(days=365*20),tdy+timedelta(days=365*30)]
+        #df['UPDATE_TIME']=df.apply(lambda x:x.strftime('%Y/%m/%d %H:%M:%S'),axis=1)
+        ret = df[['LAST']]
+        fig, ax = plt.subplots()
+        ax.plot(time_range, ret['LAST'], color="blue")
+        plt.suptitle(f"Yield Curve", size=12)
+        plt.savefig(buffer, format='jpeg')
+        msg = ret.to_string(index=True,header=False)
+        ret=ret.to_dict()['LAST']
+        yield_spread = float(ret['US10Y'].strip('%')) - float(ret['US2Y'].strip('%'))
+        msg+=\
+f"""\n___________________
+2Y-10Y Spread: {round(yield_spread,4)}"""
+        update.message.reply_photo(photo=buffer.getvalue(), caption=msg)
+        #update.message.reply_text(ret.to_string(index=True))
 
+        return
     def _help(self, update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
         msg = """Command :
@@ -335,7 +366,7 @@ PUT  OI
     def run(self):
         logger.info(f"Bot starts at:{datetime.now().strftime('%Y/%m/%d %H:%M:%S')}")
         self.dispatcher = self.updater.dispatcher
-
+        self.dispatcher.add_handler(CommandHandler("yield", self._get_yield_curve_chart))
         self.dispatcher.add_handler(CommandHandler("hkstockoi", self._get_stock_option_oi))
         self.dispatcher.add_handler(CommandHandler("hkshortvol", self._get_HK_open_interest))
         self.dispatcher.add_handler(CommandHandler("cryptooi", self._get_crypto_open_interest))

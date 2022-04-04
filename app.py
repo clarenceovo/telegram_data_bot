@@ -70,7 +70,7 @@ class financial_data_bot:
         df.columns = ['UPDATE_TIME', 'OPEN', 'HIGH', 'LOW', 'LAST', 'PREV_CLOSE']
         df['UPDATE_TIME'] = pd.to_datetime(df['UPDATE_TIME'], format='%Y-%m-%dT%H:%M:%S.%f%z')
         #df.reset_index(inplace=True)
-        df.sort_index(key=lambda x:x.map(positon))
+        df=df.sort_index(key=lambda x:x.map(positon))
         df.index = df.index.map(name_mapping)
         ret = df.copy()
         ret = ret[['LAST','PREV_CLOSE']]

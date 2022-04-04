@@ -58,13 +58,17 @@ class financial_data_bot:
                      tdy+timedelta(days=365*5),tdy+timedelta(days=365*10),tdy+timedelta(days=365*20),tdy+timedelta(days=365*30)]
         #df['UPDATE_TIME']=df.apply(lambda x:x.strftime('%Y/%m/%d %H:%M:%S'),axis=1)
         ret = df[['LAST']]
-        fig, ax = plt.subplots()
-        ax.plot(time_range, ret['LAST'], color="blue")
-        plt.suptitle(f"Yield Curve", size=12)
+        ret['LAST']= ret.apply(lambda x:float(x['LAST'].strip('%')),axis=1)
+        limit = int(ret['LAST'].max()*1.5)
+        #ax.set_xlim(0, limit)
+        plt.plot(time_range, ret['LAST'], color="blue")
+        plt.gcf().autofmt_xdate()
+        plt.title(f"UST Yield Curve", size=12)
+        plt.ylim([0, limit])
         plt.savefig(buffer, format='jpeg')
         msg = ret.to_string(index=True,header=False)
         ret=ret.to_dict()['LAST']
-        yield_spread = float(ret['US10Y'].strip('%')) - float(ret['US2Y'].strip('%'))
+        yield_spread = ret['US10Y'] - ret['US2Y']
         msg+=\
 f"""\n___________________
 2Y-10Y Spread: {round(yield_spread,4)}"""

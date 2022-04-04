@@ -81,10 +81,8 @@ Get the live IG Market Price
         logger.info(f"User:{user_name};ID:{id};Time:{time}")
 
     def __get_chart_limit(self,df_col):
-        print(df_col)
         max = df_col.max()
         max = max*1.1
-        print(f'MAX :{max}')
         return max if max % 100 == 0 else max + 100 - max % 100
 
     def _get_stock_option_oi(self,update: Update, context: CallbackContext) -> None:
@@ -128,6 +126,7 @@ Get the live IG Market Price
             axe1.set_title("CALL")
             axe1.invert_xaxis()
             plt.ylabel("Strike")
+            last_record_date = last_record_date[:10]
             plt.suptitle(f"Open Interest@{last_record_date.strftime('%Y/%m/%d')} Option Month:{month[:7]}", size=12)
             plt.savefig(buffer, format='jpeg')
 
@@ -144,7 +143,7 @@ Get the live IG Market Price
 
 
             ret=f"""
-Ticker:{ticker} Option OI Change @{last_record_date.strftime('%Y/%m/%d')}
+Ticker:{ticker} Option OI Change @{last_record_date}
 CALL OI 
 -----------
 {call_ret.to_string(index=False,header=True,col_space=8)}
@@ -154,7 +153,10 @@ PUT  OI
 {put_ret.to_string(index=False,header=True,col_space=8)}
 """
             update.message.reply_photo(photo=buffer.getvalue(), caption=ret)
-            #update.message.reply_text(ret)
+
+
+
+
     def _get_crypto_open_interest(self,update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
         cmd = update.message.text.split("/cryptooi")[1].split(' ')
@@ -272,9 +274,7 @@ PUT  OI
                 #sns_plot = sns.lineplot(data=data , x=data.index,y="turnover",ax=axs[0])
                 plt.gcf().autofmt_xdate()
                 plt.savefig(buffer,format='jpeg')
-                print(data)
                 ret_df = data.tail(14)
-                print(ret_df)
                 ret_df['turnover']= ret_df.apply(lambda x:"$"+f"{x['turnover']:,}",axis=1)
                 ret_df['shares']= ret_df.apply(lambda x:' '+f"{x['shares']:,}"+' ',axis=1)
                 ret_df.columns=[' Date  ',"Shares ",'Turnover($HKD)']

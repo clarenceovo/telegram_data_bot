@@ -127,7 +127,7 @@ Get the live IG Market Price
             axe1.invert_xaxis()
             plt.ylabel("Strike")
             last_record_date = last_record_date[:10]
-            plt.suptitle(f"Open Interest@{last_record_date.strftime('%Y/%m/%d')} Option Month:{month[:7]}", size=12)
+            plt.suptitle(f"Open Interest@{last_record_date} Option Month:{month[:7]}", size=12)
             plt.savefig(buffer, format='jpeg')
 
             #ret['price_delta'] = ret.apply(lambda x: int(x['strike']) - price_settle, axis=1)

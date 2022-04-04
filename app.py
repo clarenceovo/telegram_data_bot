@@ -38,7 +38,50 @@ class financial_data_bot:
         self.__ig_quote = {}
         self.__ig_quote_ts = 0
 
-
+    def _get_fx_cross(self, update: Update, context: CallbackContext) -> None:
+        name_mapping = {
+            "HKD=":"USD/HKD",
+            "EUR=":"EUR/USD",
+            "CHF=":"USD/CHF",
+            "AUD=":"AUD/USD",
+            "JPY=":"USD/JPY",
+            "SGD=":"USD/SGD",
+            "CAD=":"USD/CAD",
+            "GBP=":"GBP/USD",
+            "CNY=":"USD/CNY"
+        }
+        positon = {
+            "HKD=":6,
+            "EUR=":0,
+            "CHF=":5,
+            "AUD=":3,
+            "JPY=":2,
+            "SGD=":7,
+            "CAD=":4,
+            "GBP=":1,
+            "CNY=":8
+        }
+        self.__on_trigger(update)
+        data_dict = {}
+        res = self.__data_service.get_fx()
+        for symbol ,item in res:
+            data_dict[symbol]=[item.update_time,item.open,item.high,item.low,item.last,item.prev_close]
+        df = pd.DataFrame.from_dict(data_dict,orient='index')
+        df.columns = ['UPDATE_TIME', 'OPEN', 'HIGH', 'LOW', 'LAST', 'PREV_CLOSE']
+        df['UPDATE_TIME'] = pd.to_datetime(df['UPDATE_TIME'], format='%Y-%m-%dT%H:%M:%S.%f%z')
+        #df.reset_index(inplace=True)
+        df.sort_index(key=lambda x:x.map(positon))
+        df.index = df.index.map(name_mapping)
+        ret = df.copy()
+        ret = ret[['LAST','PREV_CLOSE']]
+        ret['LAST']=ret['LAST'].astype(float)
+        ret['PREV_CLOSE']=ret['PREV_CLOSE'].astype(float)
+        ret['change']=ret.apply(lambda x:f"{(round(((x['LAST']-x['PREV_CLOSE'])/x['PREV_CLOSE']),3))}%",axis=1)
+        ret=ret[['LAST','change']]
+        msg = "   PAIR       Current   Change%\n"
+        msg += ret.to_string(index=True, header=False)
+        update.message.reply_text(msg)
+        #return
 
     def _get_yield_curve_chart(self, update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
@@ -376,6 +419,7 @@ PUT  OI
     def run(self):
         logger.info(f"Bot starts at:{datetime.now().strftime('%Y/%m/%d %H:%M:%S')}")
         self.dispatcher = self.updater.dispatcher
+        self.dispatcher.add_handler(CommandHandler("fx", self._get_fx_cross))
         self.dispatcher.add_handler(CommandHandler("yield", self._get_yield_curve_chart))
         self.dispatcher.add_handler(CommandHandler("hkstockoi", self._get_stock_option_oi))
         self.dispatcher.add_handler(CommandHandler("hkshortvol", self._get_HK_open_interest))

@@ -90,6 +90,20 @@ class data_service:
             ret.append(formatted)
         return ret
 
+    def get_fx(self):
+        result = []
+        job_list = []
+        ret = []
+        requests_list = ["EUR=", "JPY=","AUD=", "GBP=", "CAD=", "CHF=", "SGD=", "CNY=", "HKD="]
+        for item in requests_list:
+            job = self.data_service_executor.submit(self.get_cnbc_quote, item)
+            job_list.append(job)
+        for future in concurrent.futures.as_completed(job_list):
+            result.append(future.result())
+        for ticker, item in result:
+            formatted = self._process_ticker(ticker, item)
+            ret.append(formatted)
+        return ret
 
 
 

@@ -76,7 +76,7 @@ class financial_data_bot:
         ret = ret[['LAST','PREV_CLOSE']]
         ret['LAST']=ret['LAST'].astype(float)
         ret['PREV_CLOSE']=ret['PREV_CLOSE'].astype(float)
-        ret['change']=ret.apply(lambda x:f"{(round(((x['LAST']-x['PREV_CLOSE'])/x['PREV_CLOSE']),3))}%",axis=1)
+        ret['change']=ret.apply(lambda x:f"{(round(((x['LAST']-x['PREV_CLOSE'])/x['PREV_CLOSE'])*100,3))}%",axis=1)
         ret=ret[['LAST','change']]
         msg = "   PAIR       Current   Change%\n"
         msg += ret.to_string(index=True, header=False)
@@ -115,6 +115,7 @@ class financial_data_bot:
 
         plt.ylim([lower_limt, upper_limit])
         plt.savefig(buffer, format='jpeg')
+        plt.close()
         msg = ret.to_string(index=True,header=False)
         ret=ret.to_dict()['LAST']
         yield_spread = ret['US10Y'] - ret['US2Y']
@@ -279,6 +280,7 @@ PUT  OI
                 buffer = io.BytesIO()
                 plt.title(f'{ticker} OI@{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
                 plt.savefig(buffer,format='jpeg')
+                plt.close()
                 update.message.reply_photo(photo=buffer.getvalue())
                 buffer.close()
 

@@ -36,7 +36,15 @@ class data_service:
         Executor: ThreadPoolExecutor = None
         self.data_service_executor = ThreadPoolExecutor(500)
 
-
+    def get_stock_option_oi_by_ticker(self,ticker,month,start,end)->pd.DataFrame:
+        res = requests.get(self.__api + "/equity/HK/getHSIStockOptionOI", params={
+            "ticker": ticker,
+            "month": month,
+            "start": start,
+            "end": end,
+        })
+        if res.status_code == 200:
+            return pd.DataFrame(res.json()['data'])
 
 
     def get_cnbc_quote(self,ticker:str):

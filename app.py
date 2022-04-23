@@ -6,7 +6,7 @@ import pandas as pd
 import seaborn as sns
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
-
+from fractions import Fraction
 from api_data_service.api import data_service
 from  IGDataSnapshotter.IGDataSnapshotter import IGDataSnapshotter
 from datetime import datetime , date,timedelta
@@ -106,22 +106,21 @@ class financial_data_bot:
         ret.drop(['US3M','US6M'],axis=0,inplace=True)
         time_range=time_range[2:]
         #Remove ST
-        upper_limit = int(ret['LAST'].max()*1.2)
+        upper_limit = round(ret['LAST'].max()*1.2,1)
         lower_limt = ret['LAST'].min()*0.8
         #ax.set_xlim(0, limit)
-        plt.plot(time_range, ret['LAST'], color="blue")
+        fig=plt.plot(time_range, ret['LAST'], color="blue")
         plt.gcf().autofmt_xdate()
         plt.title(f"UST Yield Curve", size=12)
-
         plt.ylim([lower_limt, upper_limit])
         plt.savefig(buffer, format='jpeg')
-        plt.close()
+        plt.close(fig=plt.get_fignums().pop())
         msg = ret.to_string(index=True,header=False)
         ret=ret.to_dict()['LAST']
         yield_spread = ret['US10Y'] - ret['US2Y']
         msg+=\
 f"""\n___________________
-2Y-10Y Spread: {round(yield_spread,4)}"""
+10Y-2Y Spread: {round(yield_spread,4)}"""
         update.message.reply_photo(photo=buffer.getvalue(), caption=msg)
         #update.message.reply_text(ret.to_string(index=True))
 
@@ -238,7 +237,7 @@ PUT  OI
 {put_ret.to_string(index=False,header=True,col_space=8)}
 """
             update.message.reply_photo(photo=buffer.getvalue(), caption=ret)
-
+            plt.close(fig=plt.get_fignums().pop())
 
 
 
@@ -280,9 +279,48 @@ PUT  OI
                 buffer = io.BytesIO()
                 plt.title(f'{ticker} OI@{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
                 plt.savefig(buffer,format='jpeg')
-                plt.close()
+                plt.close(fig=plt.get_fignums().pop())
                 update.message.reply_photo(photo=buffer.getvalue())
                 buffer.close()
+
+    def hk_bull_bear(self,update: Update, context: CallbackContext) -> None:
+        self.__on_trigger(update)
+        buffer = io.BytesIO()
+        res = requests.get(f'https://www.bnppwarrant.com/tc/data/json/cbbc-band-json-all/ucode/HSI/step/15/spread/100/')
+        ret = res.json()
+        bull_bear_data = ret['mainData']
+        bull = pd.DataFrame(list(filter(lambda x: x["ty"]=='bull', bull_bear_data)))
+        bear = pd.DataFrame(list(filter(lambda x: x["ty"]=='bear', bull_bear_data)))
+        ref_date = ret['furtherData']['sdate']
+        ref_price =ret['furtherData']['hsilast']
+        bull_sum = float(ret['furtherData']['sumBull'])
+        bear_sum = float(ret['furtherData']['sumBear'])
+        bull['range']=bull.apply(lambda x:str(x['fr'])+'-'+str(x['to']),axis=1)
+        bear['range'] = bear.apply(lambda x: str(x['fr']) + '-' + str(x['to']), axis=1)
+        fig = plt.figure(figsize=(10, 8), dpi=80)
+        axe1= plt.subplot(211)
+        axe2 = plt.subplot(212 )
+        bar1=axe1.barh(bear['range'], bear['d1'], align='edge', color='red')
+        axe1.set_title("BEAR")
+        bar2=axe2.barh(bull['range'], bull['d1'], align='edge', color='green')
+        axe2.set_title("BULL")
+        plt.ylabel("Strike")
+        plt.suptitle(f"Bull Bear Distrubution@{ref_date[:10]}", size=16)
+        axe1.bar_label(bar1)
+        axe2.bar_label(bar2)
+        plt.savefig(buffer, format='jpeg')
+        msg = f"""
+Update Time :{ref_date[:10]}
+Mark Price:{ref_price}
+        
+        """
+        update.message.reply_photo(photo=buffer.getvalue(),caption=msg)
+        plt.close(fig=plt.get_fignums().pop())
+
+
+        return
+
+
 
     def _get_hsi_future_open_interest(self,update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
@@ -398,6 +436,7 @@ PUT  OI
             "ask":ask
         }
 
+
     def __get_snapshot(self):
         #trigger the update 10 second each
         if (datetime.now().timestamp()-self.__ig_quote_ts) >self.__config['ig_update_interval']:
@@ -430,6 +469,7 @@ PUT  OI
         #self.dispatcher.add_handler(CommandHandler("igmarket", self._ig_market))
         self.dispatcher.add_handler(CommandHandler("igmarket", self.__serive_unavailable))
         self.dispatcher.add_handler(CommandHandler("help", self._help))
+        self.dispatcher.add_handler(CommandHandler("hkbull", self.hk_bull_bear))
         self.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, self._general_query))
         #logger.info(f"Bot starts at:{datetime.now().strftime('%Y/%m/%d %H:%M:%S')}")
         self.updater.start_polling()

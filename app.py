@@ -144,6 +144,15 @@ It returns 30 Days HSI future open interest data
 It returns the latest stock option OI change of a stock
 <mode> :type 'c2' to next the next forward option 
 
+/fx 
+Get real time FX Price 
+
+/yield
+Get real time UST CTD Yield 
+
+/indexoi
+Get HSI Future Option OI Change and settle price
+
 /igmarket (Currently Disable :( )
 Get the live IG Market Price
         """
@@ -168,6 +177,80 @@ Get the live IG Market Price
         max = df_col.max()
         max = max*1.1
         return max if max % 100 == 0 else max + 100 - max % 100
+
+
+    def _get_index_option_oi(self,update: Update, context: CallbackContext) -> None:
+        self.__on_trigger(update)
+        buffer = io.BytesIO()
+        cmd = update.message.text.split("/indexoi")[1].split(' ')
+        cmd.remove('')
+        if len(cmd)>0:
+            mode = cmd[0] #C2
+        else:
+            mode = 'c1'
+
+        if mode == 'c2':
+            month = self.__get_contract_month()[1]
+        else:
+            month = self.__get_contract_month()[0]
+
+        end = datetime.utcnow() + timedelta(hours=8)
+        end_str = end.strftime("%Y-%m-%d")
+        start_str = end - timedelta(days=7)
+        start_str = start_str.strftime("%Y-%m-%d")
+        ret = self.__data_service.get_index_future_oi(month=month,start=start_str,end=end_str)
+        last_record_date = ret['date'].max()  # last record date
+        chart_df = ret.copy()
+        call_df = chart_df.query("type == 'C'")
+        put_df = chart_df.query("type == 'P'")
+        fig = plt.figure()
+        limit = self.__get_chart_limit(chart_df['open_interest'])
+        axe2 = plt.subplot(122)
+        axe2.barh(put_df['strike'], put_df['open_interest'], align='center', color='red')
+        axe2.set_title("PUT")
+        axe2.set_xlim(0, limit)
+        axe1 = plt.subplot(121, sharey=axe2)
+        axe1.set_xlim(0, limit)
+        axe1.barh(call_df['strike'], call_df['open_interest'], align='center', color='green')
+        axe1.set_title("CALL")
+        axe1.invert_xaxis()
+        plt.ylabel("Strike")
+        last_record_date = last_record_date[:10]
+        plt.suptitle(f"Open Interest@{last_record_date} Option Month:{month[:7]}", size=12)
+        plt.savefig(buffer, format='jpeg')
+
+        #update.message.reply_photo(photo=buffer.getvalue(), caption=ret)
+        plt.close(fig=plt.get_fignums().pop())
+        ret['oi_delta_abs'] = ret.apply(lambda x: abs(int(x['oi_change'])), axis=1)
+        call_df = ret.query("type == 'C'")
+        call_df = call_df.sort_values(by=["oi_delta_abs", "open_interest"], ascending=False)
+        put_df = ret.query("type == 'P'")
+        put_df = put_df.sort_values(by=["oi_delta_abs", "open_interest"], ascending=False)
+        call_ret = call_df[['strike', 'close', "open_interest", 'implied_vol', 'oi_change']][:15]
+        put_ret = put_df[['strike', 'close', "open_interest", 'implied_vol', 'oi_change']][:15]
+        call_ret.columns = ['strike', 'close', "OI", 'IV', 'oi_delta']
+        put_ret.columns = ['strike', 'close', "OI", 'IV', 'oi_delta']
+        oi_change_call = call_df['oi_change'].sum()
+        oi_change_put=put_df['oi_change'].sum()
+        ret = f"""
+Ticker:HSI Future Option OI Change @{last_record_date}
+Month:{month[:7]}
+CALL OI 
+-----------
+{call_ret.to_string(index=False, header=True, col_space=8)}
+
+PUT  OI 
+-----------
+{put_ret.to_string(index=False, header=True, col_space=8)}
+
+OI Change
+CALL : {oi_change_call}
+PUT : {oi_change_put}
+"""
+        update.message.reply_text(ret)
+        #update.message.reply_photo(photo=buffer.getvalue(), caption=ret)
+        return
+
 
     def _get_stock_option_oi(self,update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
@@ -305,12 +388,12 @@ PUT  OI
         bar2=axe2.barh(bull['range'], bull['d1'], align='edge', color='green')
         axe2.set_title("BULL")
         plt.ylabel("Strike")
-        plt.suptitle(f"Bull Bear Distrubution@{ref_date[:10]}", size=16)
+        plt.suptitle(f"Bull Bear Distrubution@{ref_date}", size=16)
         axe1.bar_label(bar1)
         axe2.bar_label(bar2)
         plt.savefig(buffer, format='jpeg')
         msg = f"""
-Update Time :{ref_date[:10]}
+Update Time :{ref_date}
 Mark Price:{ref_price}
         
         """
@@ -466,6 +549,7 @@ Mark Price:{ref_price}
         self.dispatcher.add_handler(CommandHandler("hkshortvol", self._get_HK_open_interest))
         self.dispatcher.add_handler(CommandHandler("cryptooi", self._get_crypto_open_interest))
         self.dispatcher.add_handler(CommandHandler("hsioi", self._get_hsi_future_open_interest))
+        self.dispatcher.add_handler(CommandHandler("indexoi", self._get_index_option_oi))
         #self.dispatcher.add_handler(CommandHandler("igmarket", self._ig_market))
         self.dispatcher.add_handler(CommandHandler("igmarket", self.__serive_unavailable))
         self.dispatcher.add_handler(CommandHandler("help", self._help))

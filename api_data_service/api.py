@@ -46,6 +46,15 @@ class data_service:
         if res.status_code == 200:
             return pd.DataFrame(res.json()['data'])
 
+    def get_index_future_oi(self,month,start,end)->pd.DataFrame:
+        res = requests.get(self.__api + "/equity/HK/getHSIIndexOptionOI", params={
+            "month": month,
+            "start": start,
+            "end": end,
+        })
+        if res.status_code == 200:
+            return pd.DataFrame(res.json()['data'])
+
 
     def get_cnbc_quote(self,ticker:str):
         param = {

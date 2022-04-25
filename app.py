@@ -150,6 +150,9 @@ Get real time FX Price
 /yield
 Get real time UST CTD Yield 
 
+/hkbull
+Get latest CBBC chart from BNP CBBC Website
+
 /indexoi
 Get HSI Future Option OI Change and settle price
 

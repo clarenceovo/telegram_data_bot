@@ -122,6 +122,7 @@ class financial_data_bot:
 f"""\n___________________
 10Y-2Y Spread: {round(yield_spread,4)}"""
         update.message.reply_photo(photo=buffer.getvalue(), caption=msg)
+        plt.close(fig=plt.get_fignums().pop())
         #update.message.reply_text(ret.to_string(index=True))
 
         return
@@ -203,6 +204,7 @@ Get the live IG Market Price
         start_str = start_str.strftime("%Y-%m-%d")
         ret = self.__data_service.get_index_future_oi(month=month,start=start_str,end=end_str)
         last_record_date = ret['date'].max()  # last record date
+        ret = ret.query(f'date =="{last_record_date}"')
         chart_df = ret.copy()
         call_df = chart_df.query("type == 'C'")
         put_df = chart_df.query("type == 'P'")
@@ -438,6 +440,7 @@ Mark Price:{ref_price}
                       f'{ret.to_string(index=False,header=False)}'
 
             update.message.reply_photo(photo=buffer.getvalue(),caption=ret_str)
+            plt.close(fig=plt.get_fignums().pop())
             #update.message.reply_text(ret.to_string(index=False))
 
 

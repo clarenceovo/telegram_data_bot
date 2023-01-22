@@ -569,6 +569,9 @@ Mark Price:{ref_price}
         if "萬里長城長又長" in msg:
             self.__on_trigger(update)
             update.message.reply_text("我的尾水比他長🙏🏻")
+        if  any(item in msg for item in ["條女","解脫","放下","執著","抑鬱","忘記","多情","放得低","放低"]):
+            self.__on_trigger(update)
+            update.message.reply_text("夠鐘去喊啦!🙏🏻")
 
 if __name__ == '__main__':
     bot = financial_data_bot()

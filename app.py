@@ -646,5 +646,4 @@ Mark Price:{ref_price}
 
 if __name__ == '__main__':
     bot = financial_data_bot(sys.argv[1:])
-    cron_bot = quant_analysis()
     bot.run()

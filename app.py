@@ -8,9 +8,11 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 from fractions import Fraction
 from api_data_service.api import data_service
+from quant_cron.data_analyst import quant_analysis
 from  IGDataSnapshotter.IGDataSnapshotter import IGDataSnapshotter
-from datetime import datetime , date,timedelta
+from datetime import datetime , date,timedelta , date
 import matplotlib
+import sys
 import matplotlib.pyplot as plt
 matplotlib.use('Agg')
 matplotlib.style.use('ggplot')
@@ -23,7 +25,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 class financial_data_bot:
-    def __init__(self):
+    def __init__(self,args):
         self.__config = json.load(open(os.path.join(os.getcwd(),'config/config.json')))
         self.__api = "http://"+self.__config['api_endpoint']
         self.__data_service = data_service()
@@ -32,11 +34,17 @@ class financial_data_bot:
         self.__ticker=json.load(open(os.path.join(os.getcwd(),"config/ticker.json")))
         if self.__config is not None:
             logger.info("Loaded configuration successfully")
-        self.updater = Updater(self.__config['telegram_token'])
+        if "ENVIRONMENT"  in os.environ.keys() and os.environ["ENVIRONMENT"] == "UAT":
+            logger.info("BOT ENV:UAT")
+            self.updater = Updater(self.__config['telegram_token_uat'])
+        else:
+            self.updater = Updater(self.__config['telegram_token_prod'])
+            logger.info("BOT ENV:PROD")
         #self.__ig_conn = IGDataSnapshotter(self.__ig_credential['identifier'], self.__ig_credential['password'],self.__ig_credential['api_key'])
         #Disable IG Quote
         self.__ig_quote = {}
         self.__ig_quote_ts = 0
+
 
     def _get_fx_cross(self, update: Update, context: CallbackContext) -> None:
         name_mapping = {
@@ -545,6 +553,69 @@ Mark Price:{ref_price}
                                   "It will be back soon :)")
 
 
+    def _volume_profile(self,update: Update, context: CallbackContext) -> None:
+        self.__on_trigger(update)
+        idx = 0
+        buffer = io.BytesIO()
+        cmd = update.message.text.split("/volprofile")[1].split(' ')
+        TODAY = datetime.utcnow() + timedelta(hours=8)
+        start = (TODAY-timedelta(days=30)).strftime('%Y-%m-%d')
+        end = (TODAY+timedelta(days=1)).strftime('%Y-%m-%d')
+        if len(cmd)==1:
+            quote = "HK.HSImain"
+            start = (TODAY - timedelta(days=14)).strftime('%Y-%m-%d')
+        elif len(cmd) >1:
+            ticker = "0000"+cmd[1]
+            quote = f'HK.{ticker[-5:]}'
+            if len(cmd) ==3:
+                print("Custom date")
+                start = cmd[2]
+            if len(cmd) ==4:
+                end = cmd[3]
+        else:
+            return None
+        ret = requests.get(self.__api + "/equity/getTickerHistData", params={
+            "ticker": quote,
+            "startDate": start,
+            "endDate": end
+        })
+        if ret.status_code == 200:
+            df = pd.json_normalize(ret.json()['data'])
+            df['time'] = pd.to_datetime(df['time'], errors='coerce')
+            df = df.set_index("time")
+            df.drop(['name'], axis=1)
+            df['change'] = df.open - df.close
+            up_volume_profile = {}
+            down_volume_profile = {}
+            for value in df.change.values:
+                close = df.close.values[idx]
+                if value > 0:
+                    if close not in up_volume_profile.keys():
+                        up_volume_profile[close] = 0
+                    up_volume_profile[close] += df.volume.values[idx]
+                if value < 0:
+                    if close not in down_volume_profile.keys():
+                        down_volume_profile[close] = 0
+                    down_volume_profile[close] += df.volume.values[idx]
+
+                idx += 1
+            fig = plt.figure()
+            axe2 = plt.subplot(122)
+            up_tick = list(up_volume_profile.keys())
+            up_volume = list(up_volume_profile.values())
+            down_tick = list(down_volume_profile.keys())
+            down_volume = list(down_volume_profile.values())
+            axe2.barh(down_tick, down_volume, align='center', color='red')
+
+            axe1 = plt.subplot(121, sharey=axe2)
+            axe1.barh(up_tick, up_volume, align='center', color='green')
+            axe1.invert_xaxis()
+            plt.savefig(buffer, format='jpeg')
+            message =f"""
+                    Ticker:{quote}\nRange : {start} - {TODAY.strftime('%Y-%m-%d')}\nLast Update Time: {df.iloc[-1].name.strftime('%Y-%m-%d %H:%M:%S')}
+                    """
+            update.message.reply_photo(photo=buffer.getvalue(), caption=message)
+            buffer.close()
 
     def run(self):
         logger.info(f"Bot starts at:{datetime.now().strftime('%Y/%m/%d %H:%M:%S')}")
@@ -559,6 +630,7 @@ Mark Price:{ref_price}
         #self.dispatcher.add_handler(CommandHandler("igmarket", self._ig_market))
         self.dispatcher.add_handler(CommandHandler("igmarket", self.__serive_unavailable))
         self.dispatcher.add_handler(CommandHandler("help", self._help))
+        self.dispatcher.add_handler(CommandHandler("volprofile", self._volume_profile))
         self.dispatcher.add_handler(CommandHandler("hkbull", self.hk_bull_bear))
         self.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, self._general_query))
         #logger.info(f"Bot starts at:{datetime.now().strftime('%Y/%m/%d %H:%M:%S')}")
@@ -574,5 +646,6 @@ Mark Price:{ref_price}
             update.message.reply_text("夠鐘去喊啦!🙏🏻")
 
 if __name__ == '__main__':
-    bot = financial_data_bot()
+    bot = financial_data_bot(sys.argv[1:])
+    cron_bot = quant_analysis()
     bot.run()

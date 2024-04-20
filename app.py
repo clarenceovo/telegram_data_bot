@@ -8,7 +8,6 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 from fractions import Fraction
 from api_data_service.api import data_service
-from quant_cron.data_analyst import quant_analysis
 from  IGDataSnapshotter.IGDataSnapshotter import IGDataSnapshotter
 from datetime import datetime , date,timedelta , date
 import matplotlib

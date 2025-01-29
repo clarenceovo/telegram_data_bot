@@ -8,6 +8,7 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 from fractions import Fraction
 from api_data_service.api import data_service
+from api_data_service.AnalyticAPIClient import AnalyticAPIClient
 from  IGDataSnapshotter.IGDataSnapshotter import IGDataSnapshotter
 from datetime import datetime , date,timedelta , date
 import matplotlib
@@ -30,6 +31,7 @@ class financial_data_bot:
         self.__data_service = data_service()
         self.__image_buffer = io.BytesIO()
         self.__ig_credential = self.__config['ig_credential']
+        self.analytic_client = AnalyticAPIClient()
         self.__ticker=json.load(open(os.path.join(os.getcwd(),"config/ticker.json")))
         if self.__config is not None:
             logger.info("Loaded configuration successfully")
@@ -616,6 +618,43 @@ Mark Price:{ref_price}
             update.message.reply_photo(photo=buffer.getvalue(), caption=message)
             buffer.close()
 
+    def instrument_signal(self,update: Update, context: CallbackContext) -> None:
+        self.__on_trigger(update)
+        cmd = update.message.text.split("/signal")[1].split(' ')
+        if len(cmd)==0:
+            update.message.reply_text("Wrong Command Parameter")
+            return
+        ticker = cmd[0]
+        if ticker:
+            df = self.analytic_client.get_instrument_signal(ticker)
+            if df is not None:
+                msg = ""
+                msg += f"Signal Analysis for {symbol}\n"
+                msg += 'Record Date: ' + str(df.index[-1].strftime('%Y-%m-%d')) + '\n'
+                msg += f"Open Price: {df['open'].iloc[-1]}\n"
+                msg += f"High Price: {df['high'].iloc[-1]}\n"
+                msg += f"Low Price: {df['low'].iloc[-1]}\n"
+                msg += f"Close Price: {df['close'].iloc[-1]}\n"
+                msg += f'Amplitude: {round(df["high"].iloc[-1] - df["low"].iloc[-1], 2)}\n'
+                msg += f'Percentage Ret: {round(df["ret"].iloc[-1] * 100, 2)}%\n'
+                msg += f"ADX: {round(df['adx'].iloc[-1], 2)}| Up:{round(df['dmi_plus'].iloc[-1], 2)}| Down:{round(df['dmi_minus'].iloc[-1], 2)}\n"
+                msg += f'1Month Vol: {round(df["vol_1m"][-1] * 100, 4)}\n'
+                msg += f'3Month Vol: {round(df["vol_3m"][-1] * 100, 4)}\n'
+                msg += f"ZScore Plus 1: {round(df['zscore_plus_1'].iloc[-1], 2)}\n"
+                msg += f"ZScore Plus 2: {round(df['zscore_plus_2'].iloc[-1], 2)}\n"
+                msg += f"ZScore Plus 3: {round(df['zscore_plus_3'].iloc[-1], 2)}\n"
+                msg += f"ZScore Minus 1: {round(df['zscore_minus_1'].iloc[-1], 2)}\n"
+                msg += f"ZScore Minus 2: {round(df['zscore_minus_2'].iloc[-1], 2)}\n"
+                msg += f"ZScore Minus 3: {round(df['zscore_minus_3'].iloc[-1], 2)}\n"
+                msg += f"Overbought Ceiling: {round(df['overbought_ceiling'].iloc[-1], 2)}\n"
+                msg += f"Oversold Ceiling: {round(df['oversold_ceiling'].iloc[-1], 2)}\n"
+                msg += "\n\n"
+                update.message.reply_text(msg)
+
+        else:
+            update.message.reply_text("Wrong Command Parameter")
+            return
+
     def run(self):
         logger.info(f"Bot starts at:{datetime.now().strftime('%Y/%m/%d %H:%M:%S')}")
         self.dispatcher = self.updater.dispatcher
@@ -631,6 +670,7 @@ Mark Price:{ref_price}
         self.dispatcher.add_handler(CommandHandler("help", self._help))
         self.dispatcher.add_handler(CommandHandler("volprofile", self._volume_profile))
         self.dispatcher.add_handler(CommandHandler("hkbull", self.hk_bull_bear))
+        self.dispatcher.add_handler(CommandHandler("signal", self.instrument_signal))
         self.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, self._general_query))
         #logger.info(f"Bot starts at:{datetime.now().strftime('%Y/%m/%d %H:%M:%S')}")
         self.updater.start_polling()

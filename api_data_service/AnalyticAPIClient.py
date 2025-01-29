@@ -12,4 +12,6 @@ class AnalyticAPIClient:
             'duration': duration
         }
         response = httpx.get(url, params=params)
-        return pd.DataFrame(response.json()['data'])
+        df = pd.DataFrame(response.json()['data'])
+        df.index = pd.to_datetime(df.index)
+        return df

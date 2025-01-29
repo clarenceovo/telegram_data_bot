@@ -33,8 +33,7 @@ class data_service:
         self.__config = json.load(open(os.path.join(os.getcwd(),'config/config.json')))
         self.__api = "http://"+self.__config['api_endpoint']
         self.__cnbc_api = "https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol"
-        Executor: ThreadPoolExecutor = None
-        self.data_service_executor = ThreadPoolExecutor(32)
+        self.data_service_executor = ThreadPoolExecutor(500)
 
     def get_stock_option_oi_by_ticker(self,ticker,month,start,end)->pd.DataFrame:
         res = requests.get(self.__api + "/equity/HK/getHSIStockOptionOI", params={

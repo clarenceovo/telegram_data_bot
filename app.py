@@ -624,7 +624,7 @@ Mark Price:{ref_price}
         if len(cmd)==0:
             update.message.reply_text("Wrong Command Parameter")
             return
-        ticker = cmd[0]
+        ticker = cmd[1]
         if ticker:
             df = self.analytic_client.get_instrument_signal(ticker)
             if df is not None:

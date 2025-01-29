@@ -629,7 +629,7 @@ Mark Price:{ref_price}
             df = self.analytic_client.get_instrument_signal(ticker)
             if df is not None:
                 msg = ""
-                msg += f"Signal Analysis for {symbol}\n"
+                msg += f"Signal Analysis for {ticker}\n"
                 msg += 'Record Date: ' + str(df.index[-1].strftime('%Y-%m-%d')) + '\n'
                 msg += f"Open Price: {df['open'].iloc[-1]}\n"
                 msg += f"High Price: {df['high'].iloc[-1]}\n"

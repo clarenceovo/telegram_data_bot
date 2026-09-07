@@ -1,4 +1,4 @@
-import httpx
+import requests
 import pandas as pd
 
 class AnalyticAPIClient:
@@ -11,7 +11,8 @@ class AnalyticAPIClient:
             'symbol': symbol,
             'duration': duration
         }
-        response = httpx.get(url, params=params)
+        response = requests.get(url, params=params, timeout=(5, 30))
+        response.raise_for_status()
         df = pd.DataFrame(response.json()['data'])
         df.index = pd.to_datetime(df.index)
         return df

@@ -2,6 +2,8 @@ import logging
 import json
 import io
 import os
+import threading
+import time
 import pandas as pd
 import seaborn as sns
 import warnings
@@ -9,7 +11,10 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 from fractions import Fraction
 from api_data_service.api import data_service
 from api_data_service.AnalyticAPIClient import AnalyticAPIClient
-from  IGDataSnapshotter.IGDataSnapshotter import IGDataSnapshotter
+from api_data_service.price_history import fetch_market_history, normalize_hk_symbol, PriceHistoryError
+from analytics.regime import analyze_regime, RegimeError
+from analytics.regime_report import render_regime_report
+from analytics.volume_profile import analyze_volume_profile, VolumeProfileError
 from datetime import datetime , date,timedelta , date
 import matplotlib
 import sys
@@ -30,9 +35,8 @@ class financial_data_bot:
         self.__api = "http://"+self.__config['api_endpoint']
         self.__data_service = data_service()
         self.__image_buffer = io.BytesIO()
-        self.__ig_credential = self.__config['ig_credential']
         self.analytic_client = AnalyticAPIClient()
-        self.__ticker=json.load(open(os.path.join(os.getcwd(),"config/ticker.json")))
+        self._regime_lock = threading.BoundedSemaphore(1)
         if self.__config is not None:
             logger.info("Loaded configuration successfully")
         if "ENVIRONMENT"  in os.environ.keys() and os.environ["ENVIRONMENT"] == "UAT":
@@ -41,10 +45,6 @@ class financial_data_bot:
         else:
             self.updater = Updater(self.__config['telegram_token_prod'])
             logger.info("BOT ENV:PROD")
-        #self.__ig_conn = IGDataSnapshotter(self.__ig_credential['identifier'], self.__ig_credential['password'],self.__ig_credential['api_key'])
-        #Disable IG Quote
-        self.__ig_quote = {}
-        self.__ig_quote_ts = 0
 
 
     def _get_fx_cross(self, update: Update, context: CallbackContext) -> None:
@@ -166,8 +166,11 @@ Get latest CBBC chart from BNP CBBC Website
 /indexoi
 Get HSI Future Option OI Change and settle price
 
-/igmarket (Currently Disable :( )
-Get the live IG Market Price
+/regime [ticker]
+(eg: /regime 700; default: HK.HSImain)
+One-year closing-price chart and bull/bear mean-return probabilities
+with an approximate 95% bootstrap interval for their ratio.
+Includes volume profile and candidate support/resistance zones (60 sessions by default).
         """
         update.message.reply_text(msg)
     def __get_contract_month(self):
@@ -508,52 +511,6 @@ Mark Price:{ref_price}
             update.message.reply_text("Wrong Command Parameter")
 
 
-    def _ig_market(self,update: Update, context: CallbackContext):
-        self.__on_trigger(update)
-        self.__get_snapshot()
-        ret = self.__get_ig_quote_string()
-        update.message.reply_text(ret)
-
-
-
-
-
-    def __get_ig_quote_string(self):
-        ret = f"Updated Time:{datetime.now().strftime('%Y/%m/%d %H:%M:%S')}\n" \
-              f"--------------------------------------------------------------\n"
-        if self.__ig_quote is not None and isinstance(self.__ig_quote,dict):
-            for ticker in self.__ig_quote.keys():
-                ret+= f'{ticker}: {self.__ig_quote[ticker]["bid"]}/{self.__ig_quote[ticker]["ask"]}\n'
-        else:
-            ret = 'Quote is not available'
-
-        return ret
-    def __get_bo_dict(self,bid,ask):
-        return {
-            "bid":bid,
-            "ask":ask
-        }
-
-
-    def __get_snapshot(self):
-        #trigger the update 10 second each
-        if (datetime.now().timestamp()-self.__ig_quote_ts) >self.__config['ig_update_interval']:
-            for ticker in self.__ticker.keys():
-                ret = self.__ig_conn.get_market(self.__ticker[ticker])
-                if 'snapshot' in ret.keys():
-                    ret = ret['snapshot']
-                    self.__ig_quote[ticker]= self.__get_bo_dict(ret['bid'],ret['offer'])
-                else:
-                    logger.error(f"Instrument Error:{ticker}")
-                    logger.error(ret)
-            self.__ig_quote_ts =datetime.now().timestamp()
-
-
-    def __serive_unavailable(self,update: Update, context: CallbackContext) -> None:
-        update.message.reply_text("Sorry. This service is not available at the moment.\n"
-                                  "It will be back soon :)")
-
-
     def _volume_profile(self,update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
         idx = 0
@@ -618,6 +575,54 @@ Mark Price:{ref_price}
             update.message.reply_photo(photo=buffer.getvalue(), caption=message)
             buffer.close()
 
+    def _regime(self, update: Update, context: CallbackContext) -> None:
+        self.__on_trigger(update)
+        if len(context.args) > 1:
+            update.message.reply_text("Usage: /regime [ticker], e.g. /regime 700")
+            return
+        try:
+            symbol = normalize_hk_symbol(context.args[0] if context.args else "HK.HSImain")
+        except PriceHistoryError as exc:
+            update.message.reply_text(str(exc))
+            return
+        if not self._regime_lock.acquire(blocking=False):
+            update.message.reply_text("A regime report is running. Please try again shortly.")
+            return
+        started = time.monotonic()
+        try:
+            now = pd.Timestamp.now(tz="Asia/Hong_Kong")
+            volume_config = self.__config.get("regime_volume", {})
+            volume_mode = volume_config.get("mode", "per_bar")
+            history = fetch_market_history(self.__api, symbol, now=now, volume_mode=volume_mode)
+            closes = history.closes
+            result = analyze_regime(closes)
+            profile = None
+            volume_error = history.volume_error
+            if volume_error is None:
+                try:
+                    profile = analyze_volume_profile(
+                        history.bars, lookback_sessions=volume_config.get("sessions", 60),
+                        bins=volume_config.get("bins", 48), bandwidth=volume_config.get("bandwidth", 0.2),
+                        prominence=volume_config.get("prominence", 0.1))
+                except VolumeProfileError as exc:
+                    volume_error = str(exc)
+            photo, caption = render_regime_report(
+                symbol, closes, result, now=now, profile=profile,
+                volume_error=volume_error, volume_mode=volume_mode)
+            update.message.reply_photo(photo=photo, caption=caption)
+            if volume_error:
+                logger.warning("Regime volume profile omitted for %s: %s", symbol, volume_error)
+            logger.info("Regime report %s: %d closes, %d/%d bootstrap fits, %.2fs",
+                        symbol, len(closes), result.bootstrap_successes,
+                        result.bootstrap_samples, time.monotonic() - started)
+        except (PriceHistoryError, RegimeError) as exc:
+            update.message.reply_text("Cannot build regime report: " + str(exc))
+        except Exception:
+            logger.exception("Regime report failed for %s", symbol)
+            update.message.reply_text("The regime report could not be completed. Please try again later.")
+        finally:
+            self._regime_lock.release()
+
     def instrument_signal(self,update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
         cmd = update.message.text.split("/signal")[1].split(' ')
@@ -665,12 +670,11 @@ Mark Price:{ref_price}
         self.dispatcher.add_handler(CommandHandler("cryptooi", self._get_crypto_open_interest))
         self.dispatcher.add_handler(CommandHandler("hsioi", self._get_hsi_future_open_interest))
         self.dispatcher.add_handler(CommandHandler("indexoi", self._get_index_option_oi))
-        #self.dispatcher.add_handler(CommandHandler("igmarket", self._ig_market))
-        self.dispatcher.add_handler(CommandHandler("igmarket", self.__serive_unavailable))
         self.dispatcher.add_handler(CommandHandler("help", self._help))
         self.dispatcher.add_handler(CommandHandler("volprofile", self._volume_profile))
         self.dispatcher.add_handler(CommandHandler("hkbull", self.hk_bull_bear))
         self.dispatcher.add_handler(CommandHandler("signal", self.instrument_signal))
+        self.dispatcher.add_handler(CommandHandler("regime", self._regime, run_async=True))
         self.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, self._general_query))
         #logger.info(f"Bot starts at:{datetime.now().strftime('%Y/%m/%d %H:%M:%S')}")
         self.updater.start_polling()

@@ -1,6 +1,6 @@
 """Shared configuration, atomic research snapshots, and /recommend formatting."""
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import logging
@@ -32,6 +32,8 @@ class RecommendationConfig:
     regime_gate_probability: float = 0.5
     refresh_seconds: int = 1800
     max_cache_age_seconds: int = 7200
+    redis_url: object = None
+    watchlist_key: str = "telegram_data_bot:watchlist"
 
     @property
     def fingerprint(self):
@@ -51,10 +53,13 @@ def load_config(path=None):
     watchlist = values.get("watchlist", list(INDICES))
     if not isinstance(watchlist, list) or not watchlist or any(not isinstance(x, str) for x in watchlist):
         raise ValueError("watchlist must be a nonempty list of index codes.")
-    watchlist = tuple(x.upper() for x in watchlist)
+    watchlist = tuple(x.lstrip("^").strip().upper() for x in watchlist)
     if len(set(watchlist)) != len(watchlist) or not set(watchlist).issubset(INDICES):
         raise ValueError("Watchlist supports unique HSI, N225, NDX, SPX, DJI codes.")
     values["watchlist"] = watchlist
+    environment = os.environ.get("RECOMMEND_REDIS_URL")
+    if environment is not None:
+        values["redis_url"] = environment
     config = RecommendationConfig(**values)
     for field, low, high in [("horizon", 5, 5), ("min_train", 120, 504),
                              ("min_trades", 20, 200), ("refresh_seconds", 300, 86400),
@@ -71,9 +76,54 @@ def load_config(path=None):
     if gate is not None and (isinstance(gate, bool) or not isinstance(gate, Real)
                              or not math.isfinite(gate) or not 0.5 <= gate <= 0.95):
         raise ValueError("regime_gate_probability must be numeric in [0.5, 0.95] or null.")
+    if config.redis_url is not None and (not isinstance(config.redis_url, str) or not config.redis_url
+                                         or not config.redis_url.startswith(("redis://", "rediss://", "unix://"))):
+        raise ValueError("redis_url must be a redis://, rediss://, or unix:// URL, or null.")
+    if not isinstance(config.watchlist_key, str) or not config.watchlist_key.strip():
+        raise ValueError("watchlist_key must be a nonempty string.")
     if config.max_cache_age_seconds < config.refresh_seconds:
         raise ValueError("Cache age must be at least the refresh interval.")
     return config
+
+
+def resolve_runtime_config(config, *, reader=None):
+    """Apply the Redis watchlist list when available; otherwise keep the file.
+
+    The Redis key must hold a LIST of supported index codes (``^HSI`` or ``HSI``
+    both accepted). An absent key, an empty list, unsupported codes, duplicates,
+    or any connection error falls back to the configured file watchlist, so the
+    runner never silently scans nothing. Returns the (possibly replaced) config
+    and a source label ("redis:<key>" or "file").
+    """
+    if config.redis_url is None:
+        return config, "file"
+    if reader is None:
+        def default_reader(key):
+            import redis  # Optional at import time; required only when enabled.
+            client = redis.Redis.from_url(config.redis_url, socket_connect_timeout=2,
+                                          socket_timeout=2)
+            return client.lrange(key, 0, -1)
+        reader = default_reader
+    try:
+        raw = reader(config.watchlist_key)
+
+        def normalize(item):
+            if isinstance(item, bytes):
+                item = item.decode("utf-8", "ignore")
+            return str(item).lstrip("^").strip().upper()
+
+        codes = tuple(code for code in (normalize(item) for item in raw) if code)
+    except Exception as exc:
+        logger.warning("Redis watchlist read failed (%s); using file watchlist.", exc)
+        return config, "file"
+    if not codes:
+        return config, "file"
+    if len(set(codes)) != len(codes) or not set(codes).issubset(INDICES):
+        logger.warning("Redis watchlist %s is invalid (%s); using file watchlist.",
+                       config.watchlist_key, codes)
+        return config, "file"
+    replaced = replace(config, watchlist=codes)
+    return replaced, "redis:{}".format(config.watchlist_key)
 
 
 def database_path():
@@ -181,9 +231,11 @@ def _percent(value):
     return "n/a" if value is None else f"{value:.2%}"
 
 
-def recommendation_message(code=None, *, config_path=None, store=None, now=None):
+def recommendation_message(code=None, *, config_path=None, store=None, now=None,
+                           watchlist_reader=None):
     """Read cached results only; Telegram requests never trigger market scans."""
     config = load_config(config_path)
+    config, _source = resolve_runtime_config(config, reader=watchlist_reader)
     if code is not None:
         code = code.upper()
         if code not in config.watchlist:

@@ -237,7 +237,25 @@ The worker needs no Telegram credentials. The bot still requires a valid
 feature cadence (`regime_refit_every`, default 21 sessions) and long-only regime
 gate (`regime_gate_probability`, default 0.5, null disables), refresh interval
 and cache age in `config/recommendations.json`. Both processes must use matching
-configuration. `RECOMMEND_CONFIG` overrides that path; `RECOMMEND_DB` overrides
+configuration.
+
+**Redis-controlled watchlist.** Set `redis_url` (or the `RECOMMEND_REDIS_URL`
+environment variable) and the runner reads the symbol list from the Redis LIST
+at `watchlist_key` (default `telegram_data_bot:watchlist`) at the start of every
+cycle — control the scan universe without touching files or restarting:
+
+```sh
+redis-cli DEL telegram_data_bot:watchlist
+redis-cli RPUSH telegram_data_bot:watchlist ^SPX NDX ^HSI
+```
+
+Entries accept `^HSI` or `HSI` style codes for HSI, N225, NDX, SPX, DJI. An
+absent key, an empty list, duplicates, unsupported codes, or a connection
+failure falls back to the file watchlist, so the runner never silently scans
+nothing; the log names the source. The bot's `/recommend` resolves the same
+Redis list when formatting, so a changed list invalidates stale cached ideas
+until the next scan. The `redis` dependency is only imported when `redis_url`
+is set. `RECOMMEND_CONFIG` overrides that path; `RECOMMEND_DB` overrides
 `data/recommendations.sqlite3`. Worker `--config` takes precedence over the
 configuration environment variable. A singleton file lock prevents two workers
 from writing the same database. Stop with SIGTERM/Ctrl-C; completed scans publish

@@ -32,8 +32,14 @@ profile for HK tickers, `/recommend` daily long-only index research candidates
   (`/equity/getTickerHistData`), HK dates, volume modes per_bar/cumulative.
 - `recommendation_service.py` — config (`config/recommendations.json`:
   watchlist, cost_bps 35, threshold 0.6, `regime_refit_every` 21,
-  `regime_gate_probability` 0.5), SQLite atomic snapshots, input hash covers
-  own OHLC + other indices' closes, cache reuse on identical inputs.
+  `regime_gate_probability` 0.5, `redis_url`/`watchlist_key`), SQLite atomic
+  snapshots, input hash covers own OHLC + other indices' closes, cache reuse on
+  identical inputs. `resolve_runtime_config` overrides the file watchlist from
+  the Redis LIST `telegram_data_bot:watchlist` (bytes decoded, `^`-codes
+  normalized; absent/invalid/unreachable ⇒ file fallback, never empty);
+  `RECOMMEND_REDIS_URL` env overrides `redis_url`. Both `signal_runner.py`
+  (each cycle) and `/recommend` formatting resolve the same list so fingerprints
+  stay consistent. `redis` imported lazily only when enabled.
 - `app.py` — python-telegram-bot 22 async; `/regime` one-at-a-time via
   semaphore, blocking work in threads; passes `regime_volume` config
   (sessions/bins/bandwidth/prominence/decay_halflife/value_area).

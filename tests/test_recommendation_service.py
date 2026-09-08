@@ -130,3 +130,58 @@ async def test_command_reads_cache_only(monkeypatch, args):
         formatter.assert_called_once_with(args[0] if args else None)
         assert update.message.reply_text.call_count == 2
         assert all(len(call.args[0]) <= 3900 for call in update.message.reply_text.call_args_list)
+
+
+def test_redis_watchlist_resolution(config_file):
+    config_file.write_text(json.dumps({'watchlist': ['SPX'], 'redis_url': 'redis://localhost:6379/0'}))
+    config = service.load_config(config_file)
+    resolved, source = service.resolve_runtime_config(config, reader=lambda key: [b'^HSI', b'spx'])
+    assert resolved.watchlist == ('HSI', 'SPX')
+    assert source == 'redis:telegram_data_bot:watchlist'
+    assert resolved.fingerprint != config.fingerprint
+    for raw, why in [([], 'empty'), ([b'HSI', b'hsi'], 'duplicate'), ([b'NOPE'], 'unsupported')]:
+        _, fallback = service.resolve_runtime_config(config, reader=lambda key, r=raw: r)
+        assert fallback == 'file', why
+    def unreachable(key):
+        raise ConnectionError('redis down')
+    _, fallback = service.resolve_runtime_config(config, reader=unreachable)
+    assert fallback == 'file'
+    plain, source = service.resolve_runtime_config(config, reader=lambda key: [b'NDX'])
+    assert plain.watchlist == ('NDX',) and source.startswith('redis:')
+
+
+def test_redis_disabled_without_url(config_file):
+    config = service.load_config(config_file)
+    resolved, source = service.resolve_runtime_config(config, reader=lambda key: [b'NDX', b'NDX'])
+    assert resolved is config
+    assert source == 'file'
+    assert resolved.watchlist == ('SPX',)
+
+
+@pytest.mark.parametrize('setting', [{'redis_url': 'http://localhost'}, {'redis_url': 123},
+                                     {'watchlist_key': ''}, {'watchlist_key': 5}])
+def test_invalid_redis_config(config_file, setting):
+    config_file.write_text(json.dumps(setting))
+    with pytest.raises(ValueError):
+        service.load_config(config_file)
+
+
+def test_redis_url_environment_override(config_file, monkeypatch):
+    monkeypatch.setenv('RECOMMEND_REDIS_URL', 'redis://cache.internal:6379/1')
+    config = service.load_config(config_file)
+    assert config.redis_url == 'redis://cache.internal:6379/1'
+
+
+def test_message_uses_resolved_redis_watchlist(config_file, store):
+    config_file.write_text(json.dumps({'watchlist': ['SPX'], 'redis_url': 'redis://localhost:6379/0'}))
+    reader = lambda key: [b'^SPX']
+    assert 'not ready' in service.recommendation_message(config_path=config_file, store=store,
+                                                         watchlist_reader=reader)
+    scan(config_file, store)
+    message = service.recommendation_message(config_path=config_file, store=store, now=NOW,
+                                             watchlist_reader=reader)
+    assert 'SPX: candidate' in message
+    # A changed Redis list changes the fingerprint, hiding stale ideas.
+    changed = lambda key: [b'^NDX']
+    assert 'settings changed' in service.recommendation_message(config_path=config_file, store=store,
+                                                                now=NOW, watchlist_reader=changed)

@@ -4,6 +4,7 @@ numpy==2.5.3
 pandas==3.0.5
 python-telegram-bot==22.8
 requests==2.34.2
+redis==8.1.0
 scipy==1.18.1
 seaborn==0.13.2
 statsmodels==0.15.0

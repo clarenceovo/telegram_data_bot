@@ -6,7 +6,7 @@ import logging
 import signal
 import threading
 
-from recommendation_service import CONFIG_PATH, RecommendationStore, load_config, run_scan
+from recommendation_service import CONFIG_PATH, RecommendationStore, load_config, resolve_runtime_config, run_scan
 
 
 def main(argv=None):
@@ -31,6 +31,8 @@ def main(argv=None):
             try:
                 config = load_config(args.config)
                 interval = config.refresh_seconds
+                config, source = resolve_runtime_config(config)
+                logger.info("Watchlist from %s: %s", source, ", ".join(config.watchlist))
                 snapshot = run_scan(config, store, should_stop=stopped.is_set)
                 if snapshot:
                     logger.info("Scan saved: %d indices", len(snapshot["results"]))

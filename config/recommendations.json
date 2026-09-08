@@ -14,5 +14,7 @@
   "refresh_seconds": 3600,
   "max_cache_age_seconds": 7200,
   "regime_refit_every": 21,
-  "regime_gate_probability": 0.5
+  "regime_gate_probability": 0.5,
+  "redis_url": null,
+  "watchlist_key": "telegram_data_bot:watchlist"
 }

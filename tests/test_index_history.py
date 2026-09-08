@@ -15,10 +15,14 @@ def payload(code='SPX', count=550):
     spec = h.INDICES[code]
     dates = h._completed(spec, NOW)[-count:]
     times = [(date + pd.Timedelta(hours=12)).timestamp() for date in dates]
+    closes = list(np.linspace(100, 150, count))
+    opens = [c - 0.5 for c in closes]
+    highs = [max(o, c) + 0.4 for o, c in zip(opens, closes)]
+    lows = [min(o, c) - 0.4 for o, c in zip(opens, closes)]
     return {'chart': {'error': None, 'result': [{
         'meta': {'symbol': spec.symbol, 'exchangeTimezoneName': spec.timezone},
         'timestamp': times,
-        'indicators': {'quote': [{'close': list(np.linspace(100, 150, count))}]},
+        'indicators': {'quote': [{'open': opens, 'high': highs, 'low': lows, 'close': closes}]},
     }]}}
 
 
@@ -32,12 +36,16 @@ def install(monkeypatch, data):
 def test_valid_contract_and_request(monkeypatch, code):
     get = install(monkeypatch, payload(code))
     result = h.fetch_index_history(code, now=NOW)
+    assert isinstance(result, pd.DataFrame)
+    assert list(result.columns) == ['open', 'high', 'low', 'close']
     assert len(result) == 550
-    assert result.name == 'close'
     assert str(result.index.tz) == h.INDICES[code].timezone
     assert result.index.is_monotonic_increasing and result.index.is_unique
     assert result.index[-1] == h.latest_completed_session(code, now=NOW)
     assert (result.index.hour == 0).all()
+    assert ((result.low <= result[['open', 'close']].min(axis=1)) &
+            (result.high >= result[['open', 'close']].max(axis=1))).all()
+    np.testing.assert_allclose(result.close.to_numpy(), np.linspace(100, 150, 550))
     assert get.call_args.kwargs['timeout'] == (5, 20)
     assert get.call_args.kwargs['params'] == {'range': '5y', 'interval': '1d'}
 
@@ -64,7 +72,8 @@ def test_current_bar_invalid_is_excluded(monkeypatch):
     data = payload()
     result = data['chart']['result'][0]
     result['timestamp'].append(pd.Timestamp('2026-09-08 13:30Z').timestamp())
-    result['indicators']['quote'][0]['close'].append(None)
+    for field in ('open', 'high', 'low', 'close'):
+        result['indicators']['quote'][0][field].append(None)
     install(monkeypatch, data)
     assert len(h.fetch_index_history('SPX', now=NOW)) == 550
 
@@ -78,12 +87,31 @@ def test_invalid_completed_close(monkeypatch, invalid):
         h.fetch_index_history('SPX', now=NOW)
 
 
+@pytest.mark.parametrize('field', ['open', 'high', 'low'])
+def test_invalid_completed_ohlc(monkeypatch, field):
+    data = payload()
+    data['chart']['result'][0]['indicators']['quote'][0][field][10] = None
+    install(monkeypatch, data)
+    with pytest.raises(h.IndexHistoryError, match=f'Invalid completed {field}'):
+        h.fetch_index_history('SPX', now=NOW)
+
+
+def test_unbracketed_bar_rejected(monkeypatch):
+    data = payload()
+    quote = data['chart']['result'][0]['indicators']['quote'][0]
+    quote['high'][10] = min(quote['open'][10], quote['close'][10]) - 1.0
+    install(monkeypatch, data)
+    with pytest.raises(h.IndexHistoryError, match='bracket'):
+        h.fetch_index_history('SPX', now=NOW)
+
+
 @pytest.mark.parametrize('position,match', [(-1, 'Stale'), (200, 'Missing intervening')])
 def test_missing_sessions(monkeypatch, position, match):
     data = payload()
     result = data['chart']['result'][0]
     result['timestamp'].pop(position)
-    result['indicators']['quote'][0]['close'].pop(position)
+    for field in ('open', 'high', 'low', 'close'):
+        result['indicators']['quote'][0][field].pop(position)
     install(monkeypatch, data)
     with pytest.raises(h.IndexHistoryError, match=match):
         h.fetch_index_history('SPX', now=NOW)
@@ -94,7 +122,10 @@ def test_duplicates(monkeypatch, conflict):
     data = payload()
     result = data['chart']['result'][0]
     result['timestamp'].append(result['timestamp'][0])
-    result['indicators']['quote'][0]['close'].append(101 if conflict else 100)
+    quote = result['indicators']['quote'][0]
+    for field in ('open', 'high', 'low'):
+        quote[field].append(quote[field][0])
+    quote['close'].append(100.3 if conflict else quote['close'][0])
     install(monkeypatch, data)
     if conflict:
         with pytest.raises(h.IndexHistoryError, match='Conflicting duplicate'):

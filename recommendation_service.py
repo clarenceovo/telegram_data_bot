@@ -13,6 +13,7 @@ import sqlite3
 import pandas as pd
 
 from analytics.recommendations import MODEL_VERSION, evaluate_recommendation
+from analytics.regime_series import regime_probability_series
 from api_data_service.index_history import INDICES, fetch_index_history, latest_completed_session, planned_sessions
 
 logger = logging.getLogger(__name__)
@@ -27,13 +28,15 @@ class RecommendationConfig:
     min_train: int = 252
     min_trades: int = 30
     probability_threshold: float = 0.6
+    regime_refit_every: int = 21
+    regime_gate_probability: float = 0.5
     refresh_seconds: int = 1800
     max_cache_age_seconds: int = 7200
 
     @property
     def fingerprint(self):
         contract = {"config": asdict(self), "model": MODEL_VERSION,
-                    "source": "yahoo-daily-index-v1", "session_delay_minutes": 30}
+                    "source": "yahoo-daily-index-ohlc-v1", "session_delay_minutes": 30}
         return hashlib.sha256(json.dumps(contract, sort_keys=True).encode()).hexdigest()
 
 
@@ -55,7 +58,8 @@ def load_config(path=None):
     config = RecommendationConfig(**values)
     for field, low, high in [("horizon", 5, 5), ("min_train", 120, 504),
                              ("min_trades", 20, 200), ("refresh_seconds", 300, 86400),
-                             ("max_cache_age_seconds", 600, 172800)]:
+                             ("max_cache_age_seconds", 600, 172800),
+                             ("regime_refit_every", 5, 63)]:
         value = getattr(config, field)
         if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
             raise ValueError(f"{field} must be an integer in [{low}, {high}].")
@@ -63,6 +67,10 @@ def load_config(path=None):
         value = getattr(config, field)
         if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or not low <= value <= high:
             raise ValueError(f"{field} must be numeric in [{low}, {high}].")
+    gate = config.regime_gate_probability
+    if gate is not None and (isinstance(gate, bool) or not isinstance(gate, Real)
+                             or not math.isfinite(gate) or not 0.5 <= gate <= 0.95):
+        raise ValueError("regime_gate_probability must be numeric in [0.5, 0.95] or null.")
     if config.max_cache_age_seconds < config.refresh_seconds:
         raise ValueError("Cache age must be at least the refresh interval.")
     return config
@@ -94,8 +102,25 @@ class RecommendationStore:
         return json.loads(row[0]) if row else None
 
 
+def _input_hash(code, frame, frames):
+    """Hash a code's own OHLC plus every other index's closes it consumes."""
+    digest = hashlib.sha256()
+    digest.update(code.encode())
+    digest.update(frame.index.asi8.tobytes())
+    digest.update(frame.to_numpy(dtype="float64").tobytes())
+    for other in sorted(frames):
+        if other == code:
+            continue
+        closes = frames[other]["close"]
+        digest.update(other.encode())
+        digest.update(closes.index.asi8.tobytes())
+        digest.update(closes.to_numpy(dtype="float64").tobytes())
+    return digest.hexdigest()
+
+
 def run_scan(config, store, *, now=None, fetcher=fetch_index_history,
-             evaluator=evaluate_recommendation, should_stop=lambda: False):
+             evaluator=evaluate_recommendation, regime_series=regime_probability_series,
+             should_stop=lambda: False):
     started = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
     if started.tzinfo is None:
         raise ValueError("Scan time must be timezone-aware.")
@@ -104,20 +129,35 @@ def run_scan(config, store, *, now=None, fetcher=fetch_index_history,
     except (sqlite3.Error, ValueError):
         previous = None
     old_results = previous.get("results", {}) if previous and previous.get("config_hash") == config.fingerprint else {}
+    frames = {}
     results = {}
     for code in config.watchlist:
         if should_stop():
             return None
         try:
-            closes = fetcher(code, now=started)
-            data_hash = hashlib.sha256(closes.index.asi8.tobytes() + closes.to_numpy(dtype="float64").tobytes()).hexdigest()
+            frames[code] = fetcher(code, now=started)
+        except Exception as exc:
+            logger.exception("Recommendation fetch failed for %s", code)
+            results[code] = {"status": "data_error", "reasons": [str(exc)[:180]],
+                             "checked_at": started.isoformat(), "data_asof": None}
+    for code in config.watchlist:
+        if code in results or should_stop():
+            continue
+        try:
+            frame = frames[code]
+            closes = frame["close"]
+            data_hash = _input_hash(code, frame, frames)
             old = old_results.get(code, {})
             if old.get("input_hash") == data_hash and old.get("model_version") == MODEL_VERSION:
                 result = dict(old)
             else:
-                result = evaluator(closes, cost_bps=config.cost_bps, horizon=config.horizon,
+                others = {other: frames[other]["close"] for other in sorted(frames) if other != code}
+                probabilities = regime_series(closes, refit_every=config.regime_refit_every)
+                result = evaluator(closes, ohlc=frame[["open", "high", "low"]], others=others,
+                                   regime=probabilities, cost_bps=config.cost_bps, horizon=config.horizon,
                                    min_train=config.min_train, min_trades=config.min_trades,
-                                   probability_threshold=config.probability_threshold)
+                                   probability_threshold=config.probability_threshold,
+                                   regime_gate_probability=config.regime_gate_probability)
                 result.update(planned_sessions(code, result["data_asof"], config.horizon))
                 result["input_hash"] = data_hash
                 result["evaluated_at"] = started.isoformat()
@@ -128,6 +168,8 @@ def run_scan(config, store, *, now=None, fetcher=fetch_index_history,
             logger.exception("Recommendation scan failed for %s", code)
             results[code] = {"status": "data_error", "reasons": [str(exc)[:180]],
                              "checked_at": started.isoformat(), "data_asof": None}
+    if should_stop():
+        return None
     completed = pd.Timestamp.now(tz="UTC") if now is None else started
     snapshot = {"config_hash": config.fingerprint, "started_at": started.isoformat(),
                 "completed_at": completed.isoformat(), "results": results}

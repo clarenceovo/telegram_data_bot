@@ -64,6 +64,15 @@ def render_regime_report(
         end = profile.end.tz_convert("Asia/Hong_Kong").tz_localize(None)
         price_ax.hlines(profile.poc, start, end, colors="#a97619", linestyles="--", linewidth=1.5)
         volume_ax.axhline(profile.poc, color="#a97619", linestyle="--", linewidth=1.2)
+        if profile.value_area_low is not None and profile.value_area_high is not None:
+            price_ax.fill_between([start, end], profile.value_area_low, profile.value_area_high,
+                                  color="#6f6bb5", alpha=0.10)
+            price_ax.hlines([profile.value_area_low, profile.value_area_high], start, end,
+                            colors="#6f6bb5", linestyles=":", linewidth=1.3)
+            volume_ax.axhline(profile.value_area_low, color="#6f6bb5", linestyle=":", linewidth=1.0)
+            volume_ax.axhline(profile.value_area_high, color="#6f6bb5", linestyle=":", linewidth=1.0)
+            price_ax.annotate("VA", (end, profile.value_area_high), xytext=(4, 0),
+                              textcoords="offset points", color="#6f6bb5", fontsize=8, va="center")
         rows = []
         for prefix, zones, color in [("S", profile.supports, "#278454"),
                                       ("R", profile.resistances, "#b44747")]:
@@ -115,6 +124,11 @@ def render_regime_report(
     with io.BytesIO() as output:
         fig.savefig(output, format="png")
         photo = output.getvalue()
+    if result.regime_half_life is not None:
+        persistence = "Persistence: gain {gain:.3f}; shock half-life ≈ {half:.0f} sessions.".format(
+            gain=result.kalman_gain, half=result.regime_half_life)
+    else:
+        persistence = "Persistence: boundary fit (constant mean); no finite half-life."
     caption = (
         "{symbol} regime | as of {asof} HK\n"
         "Input: observed-session ln(close[t] / close[t-1]); Kalman mean.\n"
@@ -122,6 +136,7 @@ def render_regime_report(
         "Bull {bull:.1%} | Bear {bear:.1%}\n"
         "Bull/Bear ratio: {ratio}:1\n"
         "Approx. 95% bootstrap interval for ratio: [{lo}, {hi}]\n"
+        "{persistence}\n"
         "Bull = positive current mean return; not next-day odds.\n"
         "Interval measures fitted-parameter uncertainty; model-dependent.\n"
         "{success}/{total} bootstrap fits. API daily last prices; adjustments and missing sessions unverified."
@@ -130,12 +145,20 @@ def render_regime_report(
              ratio=_ratio(result.bull_bear_ratio), lo=_ratio(result.ratio_interval[0]),
              hi=_ratio(result.ratio_interval[1]), success=result.bootstrap_successes,
              total=result.bootstrap_samples, mean=result.estimated_mean_return,
-             mean_lo=result.mean_return_interval[0], mean_hi=result.mean_return_interval[1])
+             mean_lo=result.mean_return_interval[0], mean_hi=result.mean_return_interval[1],
+             persistence=persistence)
     if symbol == "HK.HSImain":
         caption += " Futures rolls may affect returns."
     if profile is not None:
-        caption += "\nVolume: {} sessions; POC {:.2f}. Candidate S/R zones and volume shares on chart.".format(
-            profile.sessions, profile.poc)
+        caption += "\nVolume: {} sessions; POC {:.2f}.".format(profile.sessions, profile.poc)
+        if profile.value_area_low is not None and profile.value_area_high is not None:
+            caption += " Value area: [{:.2f}, {:.2f}].".format(
+                profile.value_area_low, profile.value_area_high)
+        caption += " Candidate S/R zones and volume shares on chart."
+        if profile.decay_halflife is not None:
+            caption += " Volume decay half-life {:.0f} sessions.".format(profile.decay_halflife)
+        else:
+            caption += " Equal-weight volume."
         caption += " Per-bar volume assumed." if volume_mode == "per_bar" else " Daily cumulative volume differenced."
     elif volume_error:
         caption += "\nVolume profile unavailable: " + volume_error[:150]

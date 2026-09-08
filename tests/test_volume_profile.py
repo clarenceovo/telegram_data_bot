@@ -166,6 +166,44 @@ class VolumeProfileTests(unittest.TestCase):
             with self.subTest(kind=kind), self.assertRaises(VolumeProfileError):
                 analyze_volume_profile(data)
 
+    def test_value_area_brackets_poc_and_holds_share(self):
+        result = analyze_volume_profile(bars(), value_area=0.7)
+        self.assertIsNotNone(result.value_area_low)
+        self.assertIsNotNone(result.value_area_high)
+        self.assertLessEqual(result.value_area_low, result.poc)
+        self.assertLessEqual(result.poc, result.value_area_high)
+        edges = result.bin_edges
+        histogram = result.volume_shares
+        inside = 0.0
+        for share, lower, upper in zip(histogram, edges[:-1], edges[1:]):
+            if lower >= result.value_area_low - 1e-12 and upper <= result.value_area_high + 1e-12:
+                inside += share
+        self.assertGreaterEqual(inside, 0.7 - 1e-9)
+        self.assertLess(inside, 0.7 + histogram.max())
+        self.assertIsNone(result.decay_halflife)
+
+    def test_decay_shifts_poc_toward_recent_volume(self):
+        sessions = 60
+        index = pd.bdate_range("2026-01-01", periods=sessions, tz="Asia/Hong_Kong")
+        prices = np.r_[np.full(40, 90.0), np.full(20, 130.0)]
+        data = pd.DataFrame({"close": prices, "volume": np.full(sessions, 100.0)}, index=index)
+        equal = analyze_volume_profile(data)
+        decayed = analyze_volume_profile(data, decay_halflife=10)
+        self.assertLess(equal.poc, 100)
+        self.assertGreater(decayed.poc, 110)
+        self.assertEqual(decayed.decay_halflife, 10)
+        # Without decay the two nodes have equal mass; with decay the old node fades.
+        self.assertGreater(decayed.poc, equal.poc)
+
+    def test_decay_parameters_validated(self):
+        data = bars()
+        for kwargs in [{"decay_halflife": 1}, {"decay_halflife": 253}, {"decay_halflife": 0},
+                       {"decay_halflife": True}, {"decay_halflife": np.nan},
+                       {"value_area": 0.5}, {"value_area": 0}, {"value_area": 1.2},
+                       {"value_area": True}]:
+            with self.subTest(kwargs=kwargs), self.assertRaises(VolumeProfileError):
+                analyze_volume_profile(data, **kwargs)
+
 
 if __name__ == "__main__":
     unittest.main()

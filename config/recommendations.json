@@ -1,10 +1,18 @@
 {
-  "watchlist": ["^HSI", "^N225", "^NDX", "^SPX", "^DJI"],
+  "watchlist": [
+    "^HSI",
+    "^N225",
+    "^NDX",
+    "^SPX",
+    "^DJI"
+  ],
   "cost_bps": 35.0,
   "horizon": 5,
   "min_train": 252,
   "min_trades": 30,
   "probability_threshold": 0.6,
   "refresh_seconds": 3600,
-  "max_cache_age_seconds": 7200
+  "max_cache_age_seconds": 7200,
+  "regime_refit_every": 21,
+  "regime_gate_probability": 0.5
 }

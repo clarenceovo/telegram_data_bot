@@ -23,9 +23,15 @@ mean[t] = mean[t-1] + state_noise[t]
 
 Both noise terms are independent, zero-mean Gaussian variables with variances
 estimated by maximum likelihood. The filter estimates a changing average return;
-there is no overlapping moving-average preprocessing. Returns are scaled by
-their sample standard deviation for numerical conditioning, without demeaning.
-Reported mean returns are restored to natural-log-return units.
+there is no overlapping moving-average preprocessing. Returns are scaled by a
+**causal exponentially weighted volatility** (RiskMetrics recursion, lambda 0.94)
+rather than a constant sample standard deviation: daily index returns are
+heteroskedastic, so time-varying scaling lets the Gaussian filter see an
+approximately homoskedastic input. Scaling never demeans; zero is the bull/bear
+threshold. The seed variance uses only the first at most 20 returns and only
+affects the earliest warmup scaling. Reported mean returns are restored to
+natural-log-return units at the latest EWMA volatility. Fat tails beyond
+volatility clustering are not modeled.
 
 Given the latest filtered mean `m` and standard deviation `s`:
 
@@ -33,6 +39,16 @@ Given the latest filtered mean `m` and standard deviation `s`:
 - Bear probability: `1 - bull_probability`.
 - Bull/bear ratio: `bull_probability / bear_probability` (odds, displayed as x:1).
 - Mean-return 95% state interval: `m +/- 1.96*s`, conditional on fitted parameters.
+
+**Regime persistence.** The fitted level-to-observation variance ratio `q`
+implies the steady-state Kalman gain `K = (sqrt(q^2 + 4q) - q) / 2`; a level
+shock decays by `(1 - K)` per session, so its half-life is
+`ln(2) / -ln(1 - K)` observed sessions. The report displays the gain and
+half-life. When maximum likelihood collapses the level variance onto the
+boundary (a constant-mean fit — common for near-martingale daily index
+returns), the filtered probability degenerates to a z-test of the sample mean
+and the report shows no half-life instead of an invented one; such fits remain
+valid under the model and are labeled, not rejected.
 
 These are model probabilities about the **current mean**, not next-day up/down
 odds, investor sentiment, or a validated profitable trading signal. Extreme
@@ -142,7 +158,9 @@ Optional settings in the existing untracked `config/config.json`:
   "sessions": 60,
   "bins": 48,
   "bandwidth": 0.2,
-  "prominence": 0.1
+  "prominence": 0.1,
+  "decay_halflife": 20,
+  "value_area": 0.7
 }
 ```
 
@@ -153,6 +171,15 @@ first observed counter as that bar's volume and rejects subsequent decreases;
 an incomplete session can therefore attribute earlier unseen volume to the
 first observed close. These HK-date boundaries may differ from futures trading
 sessions. No automatic inference of the volume convention is attempted.
+
+`decay_halflife` (sessions, `2–252`, or null) applies geometric decay to bar
+volume by session age: a node from `2 × halflife` sessions ago carries half the
+weight of one from `halflife` sessions ago. `null` weights every session
+equally (previous behavior). `value_area` (`0.5–1.0`, default 0.70) builds the
+market-profile value area: expanding from the POC bin outward, always adding
+the adjacent bin with more (decayed) volume, until the target share is covered.
+VAL/VAH are drawn as dotted lines and reported in the caption. The value area
+is a descriptive profile-trading convention, not a confidence interval.
 
 Model details:
 
@@ -206,7 +233,9 @@ docker compose up -d --build
 
 The worker needs no Telegram credentials. The bot still requires a valid
 `config/config.json`. Configure the watchlist, assumed round-trip costs (default
-35 bps), score threshold (0.60), minimum historical trades (30), refresh interval
+35 bps), score threshold (0.60), minimum historical trades (30), the regime
+feature cadence (`regime_refit_every`, default 21 sessions) and long-only regime
+gate (`regime_gate_probability`, default 0.5, null disables), refresh interval
 and cache age in `config/recommendations.json`. Both processes must use matching
 configuration. `RECOMMEND_CONFIG` overrides that path; `RECOMMEND_DB` overrides
 `data/recommendations.sqlite3`. Worker `--config` takes precedence over the
@@ -217,20 +246,39 @@ No proactive Telegram messages or orders are sent.
 
 Data comes from Yahoo's **unofficial** public chart endpoint, for example
 `https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?range=5y&interval=1d`.
-Symbols are `^HSI`, `^N225`, `^NDX`, `^GSPC`, and `^DJI`. The adapter checks symbol,
-timezone, finite positive closes, conflicting duplicates, and contiguous completed
-exchange sessions. It excludes today's incomplete bar until 30 minutes after the
-calendar close, including half days. Known HKEX full-day weather closures in
-September 2023 supplement the exchange calendar. Unexpected missing sessions fail
-closed; this public endpoint has no service guarantee. Only daily closes are used
-for recommendations; index volume is not treated as executable market volume.
+Symbols are `^HSI`, `^N225`, `^NDX`, `^GSPC`, and `^DJI`. The adapter now
+consumes full **OHLC** bars: each completed session must supply finite positive
+open, high, low, and close with `low <= min(open, close)` and
+`high >= max(open, close)`. It checks symbol, timezone, conflicting duplicates,
+and contiguous completed exchange sessions. It excludes today's incomplete bar
+until 30 minutes after the calendar close, including half days. Known HKEX
+full-day weather closures in September 2023 supplement the exchange calendar.
+Unexpected missing sessions fail closed; this public endpoint has no service
+guarantee. Index volume is not treated as executable market volume.
 
-The fixed regularized logistic model uses **natural-log daily returns**, trailing
-5/20/60-session average returns, and 20/60-session volatility. Prices are never
-model features. Scaling and fitting use only past observations whose five-session
-outcomes have already matured, with a maximum 504 labeled observations and at least
+The fixed regularized logistic model (`daily-logistic-v2`) uses **natural-log
+daily returns**, trailing 5/20/60-session average returns, 20/60-session
+close-to-close volatility, and — when OHLC is available — **Parkinson and
+Garman-Klass range volatilities** over 20/60 sessions (range-based estimators
+are materially more efficient than close-to-close variance). Each other index
+in the watchlist contributes its latest 1- and 5-session returns as features,
+aligned by timestamp with a backward `merge_asof`: an HSI decision consumes the
+previous US session's close, while a US decision consumes the same calendar
+day's HSI close — no timezone lookahead. Finally, a **causal regime bull
+probability** series (local-level Kalman refits every `regime_refit_every`
+sessions on expanding windows, exact Kalman updates between refits, always
+using only past closes) enters as a feature and gates selection: with
+`regime_gate_probability` (default 0.5, null disables), a trade is only
+selected when the decision-date bull probability meets the gate. Prices beyond
+these derived features are never model inputs.
+
+Scaling and fitting use only past observations whose five-session outcomes
+have already matured, with a maximum 504 labeled observations and at least
 252 by default. Decision is after session t closes; proxy entry is **t+1 close**,
-and exit is **t+6 close**. Displayed entry/exit dates follow each exchange calendar.
+and exit is **t+6 close**. Displayed entry/exit dates follow each exchange
+calendar. Optional feature blocks extend the warmup: feature rows must be
+complete from the first fully valid row onward, and missing values are
+rejected, never filled.
 
 Qualification requires a current score at least 0.60, at least 30 completed
 nonoverlapping selected trades, a positive lower bound of the approximate 95%

@@ -3,6 +3,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock, AsyncMock
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -32,12 +33,18 @@ def result():
 
 
 def scan(config_file, store, evaluator=None, fetcher=None):
-    closes = pd.Series([100., 101.], index=pd.date_range('2026-09-03', periods=2, tz='America/New_York'))
+    frame = pd.DataFrame({'open': [100., 101.], 'high': [101., 102.], 'low': [99., 100.],
+                          'close': [100., 101.]},
+                         index=pd.date_range('2026-09-03', periods=2, tz='America/New_York'))
     return service.run_scan(service.load_config(config_file), store, now=NOW,
                             evaluator=evaluator or Mock(side_effect=lambda *_a, **_k: result()),
-                            fetcher=fetcher or Mock(return_value=closes))
+                            fetcher=fetcher or Mock(return_value=frame),
+                            regime_series=lambda closes, **_k: np.full(len(closes), 0.6))
 
-@pytest.mark.parametrize('setting', [{'cost_bps': float('nan')}, {'horizon': 2}, {'watchlist': ['SPX', 'SPX']}, {'refresh_seconds': True}, {'unknown': 1}])
+@pytest.mark.parametrize('setting', [{'cost_bps': float('nan')}, {'horizon': 2}, {'watchlist': ['SPX', 'SPX']},
+                                     {'refresh_seconds': True}, {'unknown': 1},
+                                     {'regime_refit_every': 2}, {'regime_refit_every': 64},
+                                     {'regime_gate_probability': 0.3}, {'regime_gate_probability': False}])
 def test_invalid_config(config_file, setting):
     config_file.write_text(json.dumps(setting))
     with pytest.raises(ValueError):
@@ -54,7 +61,9 @@ def test_reuse_and_revisions(config_file, store):
     scan(config_file, store, evaluator)
     scan(config_file, store, evaluator)
     assert evaluator.call_count == 1
-    revised = pd.Series([99., 101.], index=pd.date_range('2026-09-03', periods=2, tz='America/New_York'))
+    revised = pd.DataFrame({'open': [99., 101.], 'high': [100., 102.], 'low': [98., 100.],
+                            'close': [99., 101.]},
+                           index=pd.date_range('2026-09-03', periods=2, tz='America/New_York'))
     scan(config_file, store, evaluator, Mock(return_value=revised))
     assert evaluator.call_count == 2
     config_file.write_text(json.dumps({'watchlist': ['SPX'], 'cost_bps': 40}))

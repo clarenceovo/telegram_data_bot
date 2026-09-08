@@ -606,7 +606,9 @@ Mark Price:{ref_price}
                     profile = await asyncio.to_thread(
                         analyze_volume_profile, history.bars, lookback_sessions=volume_config.get("sessions", 60),
                         bins=volume_config.get("bins", 48), bandwidth=volume_config.get("bandwidth", 0.2),
-                        prominence=volume_config.get("prominence", 0.1))
+                        prominence=volume_config.get("prominence", 0.1),
+                        decay_halflife=volume_config.get("decay_halflife"),
+                        value_area=volume_config.get("value_area", 0.7))
                 except VolumeProfileError as exc:
                     volume_error = str(exc)
             photo, caption = render_regime_report(

@@ -1,4 +1,4 @@
-"""Completed daily cash-index closes for research, fetched from Yahoo's chart API.
+"""Completed daily cash-index OHLC bars for research, fetched from Yahoo's chart API.
 
 Yahoo's public endpoint is unofficial. Index closes are not executable prices.
 Only exchange sessions closed for at least 30 minutes are accepted; gaps are
@@ -117,13 +117,17 @@ def latest_completed_session(code: str, *, now=None) -> pd.Timestamp:
     return _completed(_spec(code), _utc_now(now))[-1]
 
 
-def fetch_index_history(code: str, *, now=None) -> pd.Series:
-    """Fetch five years of daily closes, requiring >=500 contiguous sessions.
+def fetch_index_history(code: str, *, now=None) -> pd.DataFrame:
+    """Fetch five years of daily OHLC bars, requiring >=500 contiguous sessions.
 
     ``now`` is processing time (aware); Yahoo timestamps are event instants in
     epoch seconds, converted to exchange session dates. In-progress bars are
-    discarded before price validation. Historical callers must supply only
-    historical observations to any downstream fit.
+    discarded before price validation. Each completed session must supply
+    finite positive open, high, low, and close with low <= open, close <= high
+    (index units are positive, so log-range estimators stay defined).
+    Historical callers must supply only historical observations to any
+    downstream fit. The returned DataFrame has open, high, low, and close
+    columns on exchange-local midnight timestamps.
     """
     spec = _spec(code)
     completed = _completed(spec, _utc_now(now))
@@ -151,31 +155,43 @@ def fetch_index_history(code: str, *, now=None) -> pd.Series:
         quotes = result["indicators"]["quote"]
         if not isinstance(quotes, list) or len(quotes) != 1:
             raise IndexHistoryError("Expected exactly one daily quote series")
-        closes = quotes[0]["close"]
-        if not isinstance(timestamps, list) or not isinstance(closes, list) or len(timestamps) != len(closes):
+        fields = {name: quotes[0][name] for name in ("open", "high", "low", "close")}
+        if not isinstance(timestamps, list) or len(timestamps) == 0:
             raise IndexHistoryError("Timestamp and close arrays must have equal lengths")
+        for name, values in fields.items():
+            if not isinstance(values, list) or len(values) != len(timestamps):
+                raise IndexHistoryError("Timestamp and close arrays must have equal lengths")
         if any(isinstance(t, bool) or not isinstance(t, (int, float)) or not np.isfinite(t) for t in timestamps):
             raise IndexHistoryError("Invalid epoch-second timestamp")
         dates = pd.to_datetime(timestamps, unit="s", utc=True).tz_convert(spec.timezone).normalize()
-        values = {}
+        rows = {}
         eligible = set(completed)
-        for date, close in zip(dates, closes):
+        for i, date in enumerate(dates):
             if date not in eligible:
                 continue
-            if isinstance(close, bool) or not isinstance(close, (int, float)) or not np.isfinite(close) or close <= 0:
-                raise IndexHistoryError(f"Invalid completed close for {spec.code} on {date.date()}")
-            if date in values and values[date] != close:
+            bar = {}
+            for name, values in fields.items():
+                value = values[i]
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value) or value <= 0:
+                    raise IndexHistoryError(f"Invalid completed {name} for {spec.code} on {date.date()}")
+                bar[name] = float(value)
+            tolerance = 1e-9 * bar["high"]
+            if (bar["low"] > min(bar["open"], bar["close"]) + tolerance
+                    or bar["high"] < max(bar["open"], bar["close"]) - tolerance):
+                raise IndexHistoryError(f"OHLC bar does not bracket its body for {spec.code} on {date.date()}")
+            if date in rows and rows[date] != bar:
                 raise IndexHistoryError(f"Conflicting duplicate session: {date.date()}")
-            values[date] = float(close)
-        if len(values) < 500:
+            rows[date] = bar
+        if len(rows) < 500:
             raise IndexHistoryError(f"{spec.code} requires at least 500 completed sessions")
-        series = pd.Series(values, name="close", dtype="float64").sort_index()
-        if series.index[-1] != completed[-1]:
+        frame = pd.DataFrame.from_dict(rows, orient="index", dtype="float64").sort_index()
+        frame.index.name = None
+        if frame.index[-1] != completed[-1]:
             raise IndexHistoryError(f"Stale {spec.code} history: expected {completed[-1].date()}")
-        expected = completed[completed >= series.index[0]]
-        if not series.index.equals(expected):
+        expected = completed[completed >= frame.index[0]]
+        if not frame.index.equals(expected):
             raise IndexHistoryError(f"Missing intervening exchange sessions for {spec.code}")
-        return series
+        return frame
     except IndexHistoryError:
         raise
     except (requests.RequestException, KeyError, TypeError, ValueError, OverflowError) as exc:

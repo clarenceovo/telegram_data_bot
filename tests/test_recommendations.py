@@ -133,3 +133,96 @@ def test_scored_return_below_total_loss_rejected(monkeypatch):
     monkeypatch.setattr(model, '_fit_probability', lambda *args: .9)
     with pytest.raises(ValueError, match='-100%'):
         model.evaluate_recommendation(data, min_train=20)
+
+
+def _ohlc_frame(data, spread=0.01):
+    close = data.to_numpy()
+    rng = np.random.default_rng(11)
+    drift = rng.normal(0, spread, len(close))
+    return pd.DataFrame({"open": close * (1 - np.abs(drift)),
+                         "high": np.maximum(close * (1 - np.abs(drift)), close) * (1 + np.abs(drift) + 0.002),
+                         "low": np.minimum(close * (1 - np.abs(drift)), close) * (1 - np.abs(drift) - 0.002)},
+                        index=data.index)
+
+
+def test_ohlc_range_features_extend_model_version_and_columns():
+    data = closes()
+    plain = model.evaluate_recommendation(data, min_train=30, min_trades=3)
+    ranged = model.evaluate_recommendation(data, ohlc=_ohlc_frame(data), min_train=30, min_trades=3)
+    assert ranged['model_version'] == 'daily-logistic-v2'
+    assert ranged['metrics']['feature_count'] == plain['metrics']['feature_count'] + 4
+    assert ranged['metrics']['feature_count'] == 10
+
+
+@pytest.mark.parametrize('kind', ['mismatched_index', 'missing_column', 'unbracketed', 'nan'])
+def test_invalid_ohlc_rejected(kind):
+    data = closes()
+    frame = _ohlc_frame(data)
+    if kind == 'mismatched_index':
+        frame = frame.iloc[:-1]
+    elif kind == 'missing_column':
+        frame = frame.drop(columns='high')
+    elif kind == 'unbracketed':
+        frame['high'] = data.to_numpy() * 0.5
+    elif kind == 'nan':
+        frame.iloc[3, 0] = np.nan
+    with pytest.raises(ValueError):
+        model.evaluate_recommendation(data, ohlc=frame, min_train=30)
+
+
+def test_cross_index_features_align_without_lookahead():
+    data = closes(180)
+    # SPX closes 13 hours AFTER the HSI session close on the same UTC day.
+    other_index = pd.date_range('2020-01-01 13:30', periods=180, freq='B', tz='UTC')
+    other = pd.Series(100 * np.exp(np.cumsum(np.random.default_rng(3).normal(0.0005, 0.01, 180))),
+                      index=other_index.tz_convert('America/New_York'))
+    result = model.evaluate_recommendation(data, others={'SPX': other}, min_train=30, min_trades=3)
+    assert result['metrics']['feature_count'] == 8
+    features = model._aligned_other_features('SPX', other, data.index)
+    first, second = features
+    assert np.isfinite(first[61:]).all()
+    # The first decision consumes the other index's earliest 5-session mean.
+    assert np.isnan(second[:5]).all()
+
+
+def test_short_other_history_rejected():
+    data = closes(180)
+    other = closes(5)
+    other.index = pd.date_range('2020-01-01 09:30', periods=5, freq='B', tz='UTC').tz_convert('Asia/Tokyo')
+    with pytest.raises(ValueError):
+        model.evaluate_recommendation(data, others={'N225': other}, min_train=30)
+
+
+def test_regime_feature_and_gate_block_selection(monkeypatch):
+    data = closes(200)
+    monkeypatch.setattr(model, '_fit_probability', lambda *args: .9)
+    bullish = np.r_[np.full(60, np.nan), np.full(len(data) - 60, 0.7)]
+    gated_in = model.evaluate_recommendation(data, regime=bullish, regime_gate_probability=0.5,
+                                             min_train=30, min_trades=3)
+    assert gated_in['metrics']['regime_gate_probability'] == 0.5
+    assert gated_in['metrics']['trade_count'] >= 3
+    bearish = np.r_[np.full(60, np.nan), np.full(len(data) - 60, 0.3)]
+    gated_out = model.evaluate_recommendation(data, regime=bearish, regime_gate_probability=0.5,
+                                              min_train=30, min_trades=3)
+    assert gated_out['metrics']['trade_count'] == 0
+    assert any('regime gate' in reason for reason in gated_out['reasons'])
+    ungated = model.evaluate_recommendation(data, regime=bearish, min_train=30, min_trades=3)
+    assert ungated['metrics']['trade_count'] == gated_in['metrics']['trade_count']
+
+
+@pytest.mark.parametrize('regime', ['short', 'out_of_range', 'nan_tail'])
+def test_invalid_regime_rejected(regime):
+    data = closes(100)
+    if regime == 'short':
+        values = np.full(len(data) - 1, 0.5)
+    elif regime == 'out_of_range':
+        values = np.r_[np.full(len(data) - 1, 0.5), 1.5]
+    else:
+        values = np.r_[np.full(len(data) - 1, 0.5), np.nan]
+    with pytest.raises(ValueError):
+        model.evaluate_recommendation(data, min_train=30, regime=values)
+
+
+def test_gate_requires_regime_series():
+    with pytest.raises(ValueError, match='requires a regime'):
+        model.evaluate_recommendation(closes(100), min_train=30, regime_gate_probability=0.6)

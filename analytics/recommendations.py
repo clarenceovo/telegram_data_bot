@@ -4,6 +4,15 @@ Decision after session t; proxy entry at t+1 close and exit at t+h+1 close.
 Returns are net of a fixed round-trip cost. Completed, consistently adjusted exchange-local
 index closes are the caller's responsibility. No fills or calendar checks
 are inferred here. Forecast probabilities are not claimed to be calibrated.
+
+Besides the base close-return features, the model optionally consumes OHLC
+range-based volatilities (Parkinson and Garman-Klass, which dominate
+close-to-close variance estimators in efficiency), lag-free-as-of cross-index
+returns (each other index contributes its latest COMPLETED session observed
+strictly before this index's decision timestamp), and a causal local-level
+regime bull probability from ``analytics.regime_series``. Cross-index features
+align by timestamp, not calendar date, so an HSI decision never sees a US close
+from the same calendar day and a US decision does see that day's HSI close.
 """
 
 from numbers import Real
@@ -13,20 +22,91 @@ import pandas as pd
 from scipy.optimize import minimize
 from scipy.special import expit
 
-MODEL_VERSION = "daily-logistic-v1"
+MODEL_VERSION = "daily-logistic-v2"
 
 
-def _features(prices):
+def _features(prices, extra=None):
     """Natural-log return features available at each decision close."""
     returns = pd.Series(np.diff(np.log(prices), prepend=np.nan))
-    return np.column_stack([
+    columns = [
         returns,
         returns.rolling(5).mean(),
         returns.rolling(20).mean(),
         returns.rolling(60).mean(),
         returns.rolling(20).std(ddof=1),
         returns.rolling(60).std(ddof=1),
-    ])
+    ]
+    if extra:
+        columns.extend(extra)
+    return np.column_stack(columns)
+
+
+def _range_features(frame, prices):
+    """Parkinson and Garman-Klass volatility features from OHLC bars."""
+    high = frame["high"].to_numpy(dtype=float)
+    low = frame["low"].to_numpy(dtype=float)
+    open_ = frame["open"].to_numpy(dtype=float)
+    hl = np.log(high / low)
+    co = np.log(prices / open_)
+    parkinson = pd.Series(hl ** 2 / (4.0 * np.log(2.0)))
+    garman_klass = pd.Series(0.5 * hl ** 2 - (2.0 * np.log(2.0) - 1.0) * co ** 2)
+    return [
+        np.sqrt(np.maximum(parkinson.rolling(20).mean(), 0.0)),
+        np.sqrt(np.maximum(parkinson.rolling(60).mean(), 0.0)),
+        np.sqrt(np.maximum(garman_klass.rolling(20).mean(), 0.0)),
+        np.sqrt(np.maximum(garman_klass.rolling(60).mean(), 0.0)),
+    ]
+
+
+def _aligned_other_features(name, other, index):
+    """Other-index 1- and 5-session returns as of each decision timestamp.
+
+    ``merge_asof`` backward on UTC timestamps picks the latest other-index
+    observation strictly at or before this index's session close instant, so
+    faster-closing markets are same-day information and slower ones lag.
+    """
+    if not isinstance(other, pd.Series) or not isinstance(other.index, pd.DatetimeIndex):
+        raise ValueError(f"Other index {name} must supply a DatetimeIndexed Series.")
+    if other.index.tz is None or other.index.hasnans or not other.index.is_unique \
+            or not other.index.is_monotonic_increasing or len(other) < 6:
+        raise ValueError(f"Other index {name} history is unusable for features.")
+    if any(isinstance(value, (bool, np.bool_)) for value in other):
+        raise ValueError(f"Other index {name} closes must be numeric.")
+    try:
+        other_prices = other.to_numpy(dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Other index {name} closes must be numeric.") from exc
+    if not np.isfinite(other_prices).all() or (other_prices <= 0).any():
+        raise ValueError(f"Other index {name} closes must be finite and positive.")
+    source = pd.DataFrame({"src": np.arange(len(other))}, index=other.index.tz_convert("UTC"))
+    target = pd.DataFrame({"row": np.arange(len(index))}, index=index.tz_convert("UTC"))
+    merged = pd.merge_asof(target, source, left_index=True, right_index=True, direction="backward")
+    positions = merged["src"].to_numpy(dtype=float)
+    known = np.isfinite(positions)
+    returns = np.r_[np.nan, np.diff(np.log(other_prices))]
+    mean5 = pd.Series(returns).rolling(5).mean().to_numpy()
+
+    def _pick(values):
+        picked = np.full(len(index), np.nan)
+        picked[known] = values[positions[known].astype(int)]
+        return picked
+
+    return [_pick(returns), _pick(mean5)]
+
+
+def _validate_regime(regime, n):
+    if isinstance(regime, pd.Series):
+        regime = regime.to_numpy(dtype=float)
+    else:
+        regime = np.asarray(regime, dtype=float)
+    if regime.shape != (n,):
+        raise ValueError("Regime series must align exactly with the closes.")
+    finite = np.isfinite(regime)
+    if not finite.any() or not finite[-1]:
+        raise ValueError("Regime series must end with a finite probability.")
+    if ((regime[finite] < 0.0) | (regime[finite] > 1.0)).any():
+        raise ValueError("Regime probabilities must lie in [0, 1] where finite.")
+    return regime
 
 
 def _fit_probability(train_x, train_y, current_x):
@@ -63,17 +143,22 @@ def _mean_interval(returns):
     return np.quantile(returns[indices].mean(axis=1), [0.025, 0.975]).tolist()
 
 
-def evaluate_recommendation(closes: pd.Series, *, cost_bps=35.0, horizon=5,
-                            min_train=252, min_trades=30, probability_threshold=0.6) -> dict:
+def evaluate_recommendation(closes: pd.Series, *, ohlc=None, others=None, regime=None,
+                            cost_bps=35.0, horizon=5, min_train=252, min_trades=30,
+                            probability_threshold=0.6, regime_gate_probability=None) -> dict:
     """Return a candidate only when every predefined historical gate passes.
 
     Training uses at most 504 matured labeled observations and training-only
     standardization. Test labels never participate in their own prediction.
-    Missing values are rejected, not filled. Features need 60 return warmups.
-    Index returns minus assumed costs are research proxies, not executable PnL.
-    Selection uses nonoverlapping trades (a new entry must follow prior exit).
-    The mean-return interval assumes local dependence captured by three trades;
-    it is descriptive evidence, not a guarantee or calibrated success bound.
+    Missing values are rejected, not filled. Base features need 60 return
+    warmups; optional OHLC, cross-index, and regime features may extend the
+    warmup. Index returns minus assumed costs are research proxies, not
+    executable PnL. Selection uses nonoverlapping trades (a new entry must
+    follow prior exit); when ``regime_gate_probability`` is set, selection
+    additionally requires the causal regime bull probability at the decision
+    to meet the gate. The mean-return interval assumes local dependence
+    captured by three trades; it is descriptive evidence, not a guarantee or
+    calibrated success bound.
     """
     if not isinstance(closes, pd.Series) or closes.empty:
         raise ValueError("Provide at least one completed daily close.")
@@ -100,8 +185,50 @@ def evaluate_recommendation(closes: pd.Series, *, cost_bps=35.0, horizon=5,
         raise ValueError("cost_bps must be finite and in [0, 10000).")
     if isinstance(probability_threshold, (bool, np.bool_)) or not isinstance(probability_threshold, Real) or not np.isfinite(probability_threshold) or not 0.5 <= probability_threshold < 1:
         raise ValueError("probability_threshold must be in [0.5, 1).")
+    if regime_gate_probability is not None:
+        if isinstance(regime_gate_probability, (bool, np.bool_)) or not isinstance(regime_gate_probability, Real) \
+                or not np.isfinite(regime_gate_probability) or not 0.5 <= regime_gate_probability <= 0.99:
+            raise ValueError("regime_gate_probability must be in [0.5, 0.99] or None.")
+        if regime is None:
+            raise ValueError("regime_gate_probability requires a regime probability series.")
     n = len(prices)
-    x = _features(prices)
+    regime_values = _validate_regime(regime, n) if regime is not None else None
+    extra = []
+    if ohlc is not None:
+        if not isinstance(ohlc, pd.DataFrame) or not {"open", "high", "low"}.issubset(ohlc.columns):
+            raise ValueError("ohlc must supply open, high, and low columns.")
+        if len(ohlc) != n or not ohlc.index.equals(index):
+            raise ValueError("ohlc bars must align exactly with the closes.")
+        try:
+            bars = ohlc[["open", "high", "low"]].to_numpy(dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("ohlc values must be numeric.") from exc
+        if not np.isfinite(bars).all() or (bars <= 0).any():
+            raise ValueError("ohlc values must be finite and positive.")
+        open_, high, low = bars.T
+        tolerance = 1e-9 * high
+        if (low > np.minimum(open_, prices) + tolerance).any() or (high < np.maximum(open_, prices) - tolerance).any():
+            raise ValueError("ohlc bars must bracket their open and close.")
+        extra.extend(_range_features(ohlc, prices))
+    if others is not None:
+        if not isinstance(others, dict) or not others or not all(isinstance(k, str) and k for k in others):
+            raise ValueError("others must map index names to close Series.")
+        for name in sorted(others):
+            extra.extend(_aligned_other_features(name, others[name], index))
+    if regime is not None:
+        extra.append(pd.Series(regime_values))
+    x = _features(prices, extra)
+    complete = np.isfinite(x).all(axis=1)
+    if not complete.any():
+        raise ValueError("No complete feature row: every row is missing a feature value.")
+    warmup = int(np.argmax(complete))
+    if not complete[warmup:].all():
+        raise ValueError("Feature values are missing after the warmup; input histories are inconsistent.")
+    gate = None
+    if regime_gate_probability is not None:
+        gate = np.zeros(n, dtype=bool)
+        finite = np.isfinite(regime_values)
+        gate[finite] = regime_values[finite] >= regime_gate_probability
     # labels[j] references only entry j+1 and exit j+horizon+1.
     net = np.full(n, np.nan)
     stop = n - horizon - 1
@@ -115,9 +242,9 @@ def evaluate_recommendation(closes: pd.Series, *, cost_bps=35.0, horizon=5,
     last_exit = -1
     latest_probability = None
     latest_train = None
-    for decision in range(60 + min_train + horizon, n):
+    for decision in range(warmup + min_train + horizon, n):
         last_mature = decision - horizon - 1
-        train = np.arange(max(60, last_mature - 503), last_mature + 1)
+        train = np.arange(max(warmup, last_mature - 503), last_mature + 1)
         if len(train) < min_train:
             continue
         probability = _fit_probability(x[train], (net[train] > 0).astype(float), x[decision])
@@ -129,7 +256,8 @@ def evaluate_recommendation(closes: pd.Series, *, cost_bps=35.0, horizon=5,
             raise ValueError("Scored net research return is at or below -100%; verify prices and costs.")
         baseline = float(np.mean(net[train] > 0))
         predictions.append((decision, probability, baseline, float(net[decision] > 0)))
-        if probability >= probability_threshold and decision + 1 > last_exit:
+        if probability >= probability_threshold and decision + 1 > last_exit \
+                and (gate is None or gate[decision]):
             selected.append(float(net[decision]))
             last_exit = decision + horizon + 1
     values = np.asarray(selected)
@@ -155,12 +283,16 @@ def evaluate_recommendation(closes: pd.Series, *, cost_bps=35.0, horizon=5,
         "oos_end": index[predictions[-1][0]].isoformat() if predictions else None,
         "cost_bps": float(cost_bps), "horizon": horizon, "observation_count": n,
         "evaluated_prediction_count": len(predictions), "probability_threshold": float(probability_threshold),
+        "regime_gate_probability": float(regime_gate_probability) if regime_gate_probability is not None else None,
+        "feature_count": int(x.shape[1]), "warmup_sessions": int(warmup),
     }
     reasons = []
     if latest_probability is None:
-        reasons.append("Insufficient matured training observations after the 60-session feature warmup.")
+        reasons.append("Insufficient matured training observations after the feature warmup.")
     elif latest_probability < probability_threshold:
         reasons.append("Current predicted probability is below the selection threshold.")
+    if gate is not None and not gate[-1]:
+        reasons.append("Current regime bull probability does not meet the regime gate.")
     if len(values) < min_trades:
         reasons.append(f"Only {len(values)} completed nonoverlapping selected trades; require {min_trades}.")
     if ci is None or ci[0] <= 0:

@@ -19,7 +19,8 @@ from analytics.volume_profile import analyze_volume_profile, VolumeProfileError
 @pytest.fixture
 def result():
     return RegimeResult(0.7, 0.3, (0.55, 0.8), 0.7 / 0.3,
-                        (0.55 / 0.45, 4.0), 100, 100, 0.001, (-0.001, 0.003))
+                        (0.55 / 0.45, 4.0), 100, 100, 0.001, (-0.001, 0.003),
+                        0.01, 0.095, 7.0)
 
 
 @pytest.fixture

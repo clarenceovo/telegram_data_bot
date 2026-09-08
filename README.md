@@ -68,13 +68,54 @@ historical regime probabilities or trading-performance claims are displayed.
 - Logs elapsed time, observation count, and bootstrap successes. API and fitting
   failures produce a short user-facing error and release the report lock.
 
-Install `requirements.txt` using the existing Python 3.8 Docker environment.
-The added statsmodels 0.14.1 and patsy 0.5.6 pins support that runtime. The existing
-legacy dependency set is not intended for Python 3.13/3.14.
+### Python 3.14 setup
 
-Tests: `python -m pytest tests -q` (`pytest` is a development dependency).
-Tests mock network and Telegram boundaries and exercise real numerical fits and
-PNG rendering. No live API configuration is included in the repository.
+The runtime targets CPython **3.14**. `requirements.txt` records direct dependency
+versions; `requirements.lock` pins the full runtime dependency graph, including
+transitive packages. `requirements-dev.txt` installs that lock plus test tools.
+Obsolete Tornado, APScheduler, Windows-only certificate, and zoneinfo-backport
+pins have been removed. `tzdata` supplies the HK timezone database in slim images.
+
+```sh
+python3.14 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+cp config/config.example.json config/config.json
+# Edit config/config.json with your API endpoint and Telegram tokens.
+ENVIRONMENT=UAT .venv/bin/python app.py
+.venv/bin/python -m pytest tests -q
+```
+
+The Telegram integration uses python-telegram-bot 22's `Application` and async
+callbacks. All replies are awaited. Blocking market API calls and model fitting
+run in background threads; `/regime` remains nonblocking with one active report
+per instance. The polling entry point owns an explicit event loop using
+`asyncio.Runner`, as required by Python 3.14's event-loop behavior. Existing
+HTTP requests now have 5-second connect and 30-second read timeouts.
+
+### Docker and Compose
+
+```sh
+docker compose config
+docker compose up --build -d
+docker compose logs -f bot
+```
+
+Compose defaults to UAT. Use `ENVIRONMENT=PROD docker compose up --build -d` for
+the production token. Direct `python app.py` retains its existing default of
+production when `ENVIRONMENT` is not UAT.
+
+The image uses `python:3.14-slim`, installs binary wheels from the runtime lock,
+runs `pip check`, and runs as UID 10001. Compose mounts your existing
+`config/config.json` read-only; it must be readable by that container user.
+A missing config file fails the mount instead of silently creating a directory.
+The image copies only application code. `.dockerignore` excludes local config,
+Git metadata, virtual environments, and environment files. No inbound port is
+needed because Telegram uses outbound polling.
+
+Tests exercise real numerical fits, PNG rendering, Telegram async dispatch with
+an offline request transport, and startup event-loop ownership. Live Telegram
+and market API calls are not exercised by tests. Docker itself must be installed
+to run the image; resolving Linux wheels does not replace a container smoke test.
 
 Model reference: [statsmodels local-level/state-space models](https://www.statsmodels.org/stable/generated/statsmodels.tsa.statespace.structural.UnobservedComponents.html).
 
@@ -146,3 +187,69 @@ chronological strategy study with a defined touch/rejection rule and costs.
 
 References: [SciPy weighted KDE](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.gaussian_kde.html)
 and [peak detection](https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.find_peaks.html).
+
+## Daily index recommendations
+
+`/recommend` lists qualifying long-only research candidates for **HSI, N225, NDX,
+SPX and DJI**. `/recommend SPX` shows an individual index's evidence and rejection
+reasons. An empty shortlist is a valid result. The command reads the worker's
+SQLite snapshot; it does not fetch market data or fit models on demand.
+
+Start the independent worker with:
+
+```sh
+.venv/bin/python signal_runner.py --once  # fetch, evaluate, save and exit
+.venv/bin/python signal_runner.py         # keep refreshing every 30 minutes
+# Deploy both processes with persistent shared storage:
+docker compose up -d --build
+```
+
+The worker needs no Telegram credentials. The bot still requires a valid
+`config/config.json`. Configure the watchlist, assumed round-trip costs (default
+35 bps), score threshold (0.60), minimum historical trades (30), refresh interval
+and cache age in `config/recommendations.json`. Both processes must use matching
+configuration. `RECOMMEND_CONFIG` overrides that path; `RECOMMEND_DB` overrides
+`data/recommendations.sqlite3`. Worker `--config` takes precedence over the
+configuration environment variable. A singleton file lock prevents two workers
+from writing the same database. Stop with SIGTERM/Ctrl-C; completed scans publish
+atomically, and failed indices replace their prior candidates with error status.
+No proactive Telegram messages or orders are sent.
+
+Data comes from Yahoo's **unofficial** public chart endpoint, for example
+`https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?range=5y&interval=1d`.
+Symbols are `^HSI`, `^N225`, `^NDX`, `^GSPC`, and `^DJI`. The adapter checks symbol,
+timezone, finite positive closes, conflicting duplicates, and contiguous completed
+exchange sessions. It excludes today's incomplete bar until 30 minutes after the
+calendar close, including half days. Known HKEX full-day weather closures in
+September 2023 supplement the exchange calendar. Unexpected missing sessions fail
+closed; this public endpoint has no service guarantee. Only daily closes are used
+for recommendations; index volume is not treated as executable market volume.
+
+The fixed regularized logistic model uses **natural-log daily returns**, trailing
+5/20/60-session average returns, and 20/60-session volatility. Prices are never
+model features. Scaling and fitting use only past observations whose five-session
+outcomes have already matured, with a maximum 504 labeled observations and at least
+252 by default. Decision is after session t closes; proxy entry is **t+1 close**,
+and exit is **t+6 close**. Displayed entry/exit dates follow each exchange calendar.
+
+Qualification requires a current score at least 0.60, at least 30 completed
+nonoverlapping selected trades, a positive lower bound of the approximate 95%
+block-bootstrap mean net-return interval, and an out-of-sample Brier score better
+than the historical training-frequency baseline. The interface reports the score,
+hit rate, trade count, mean net index move and its interval, compounded trade-close
+drawdown, Brier comparison, and evaluation dates. Drawdown does not measure intratrade
+risk. Scores are uncalibrated; bootstrap intervals do not include model-selection
+uncertainty. These gates are research screens, not evidence of a guaranteed edge.
+Changing thresholds after looking at results requires fresh untouched validation.
+
+Cash indices cannot be traded directly. Results subtract a configurable assumed
+cost from index moves, and do not simulate ETF tracking, futures rolls, financing,
+slippage, or fills. SPX, NDX and DJI overlap substantially. Repeated daily candidates
+are not position-aware; historical evaluation uses nonoverlapping trades. Select
+an executable instrument and validate its costs and risk before using a signal.
+
+Each scan fetches fresh history, reusing calculations only when the complete input
+and configuration are unchanged. Snapshots older than two hours, mismatched
+configuration, a newly completed exchange session, or a passed entry close hide
+old candidates. The first live five-index scan returned no qualifying ideas due
+to insufficient selected-trade evidence; thresholds were left unchanged.

@@ -1,0 +1,42 @@
+services:
+  bot:
+    build: .
+    init: true
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-UAT}
+    volumes:
+      - type: bind
+        source: ./config/config.json
+        target: /code/config/config.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./config/recommendations.json
+        target: /code/config/recommendations.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: volume
+        source: signal-data
+        target: /data
+        read_only: true
+    stop_grace_period: 60s
+  signal-runner:
+    build: .
+    init: true
+    restart: unless-stopped
+    command: ["python", "signal_runner.py"]
+    volumes:
+      - type: bind
+        source: ./config/recommendations.json
+        target: /code/config/recommendations.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - signal-data:/data
+    stop_grace_period: 180s
+
+volumes:
+  signal-data:

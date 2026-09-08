@@ -7,3 +7,8 @@ config/config.json
 .idea/misc.xml
 .idea/inspectionProfiles/Project_Default.xml
 .idea/inspectionProfiles/profiles_settings.xml
+.venv*/
+.pytest_cache/
+.env
+.env.*
+data/

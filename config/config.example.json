@@ -1,0 +1,12 @@
+{
+  "api_endpoint": "YOUR_API_HOST:8000",
+  "telegram_token_uat": "YOUR_UAT_TELEGRAM_BOT_TOKEN",
+  "telegram_token_prod": "YOUR_PRODUCTION_TELEGRAM_BOT_TOKEN",
+  "regime_volume": {
+    "mode": "per_bar",
+    "sessions": 60,
+    "bins": 48,
+    "bandwidth": 0.2,
+    "prominence": 0.1
+  }
+}

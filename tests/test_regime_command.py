@@ -1,12 +1,9 @@
 """Exercise the real bot handler with Telegram and network boundaries mocked."""
 
-import importlib.util
 import io
-from pathlib import Path
-import sys
 import threading
-from types import ModuleType, SimpleNamespace
-from unittest.mock import MagicMock, Mock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import numpy as np
 import pandas as pd
@@ -33,22 +30,9 @@ def closes():
 
 
 @pytest.fixture
-def bot_module(monkeypatch):
-    telegram = ModuleType("telegram")
-    telegram.Update = object
-    telegram.ForceReply = object
-    ext = ModuleType("telegram.ext")
-    ext.Updater = Mock()
-    ext.CommandHandler = lambda command, callback, **kw: SimpleNamespace(command=command, callback=callback, **kw)
-    ext.MessageHandler = Mock()
-    ext.Filters = MagicMock()
-    ext.CallbackContext = object
-    monkeypatch.setitem(sys.modules, "telegram", telegram)
-    monkeypatch.setitem(sys.modules, "telegram.ext", ext)
-    spec = importlib.util.spec_from_file_location("regime_test_app", Path(__file__).parents[1] / "app.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def bot_module():
+    import app
+    return app
 
 
 @pytest.fixture
@@ -62,13 +46,13 @@ def bot(bot_module):
 
 
 @pytest.mark.parametrize("args,symbol", [([], "HK.HSImain"), (["700"], "HK.00700")])
-def test_regime_success(bot_module, bot, monkeypatch, closes, result, args, symbol):
+async def test_regime_success(bot_module, bot, monkeypatch, closes, result, args, symbol):
     fetch = Mock(return_value=PriceHistory(closes, pd.DataFrame(), "Volume missing."))
     model = Mock(return_value=result)
     monkeypatch.setattr(bot_module, "fetch_market_history", fetch)
     monkeypatch.setattr(bot_module, "analyze_regime", model)
-    update = SimpleNamespace(message=Mock())
-    bot._regime(update, SimpleNamespace(args=args))
+    update = SimpleNamespace(message=Mock(reply_text=AsyncMock(), reply_photo=AsyncMock()))
+    await bot._regime(update, SimpleNamespace(args=args))
     assert fetch.call_args.args == ("http://example.test", symbol)
     assert fetch.call_args.kwargs["now"].tzinfo is not None
     model.assert_called_once_with(closes)
@@ -81,43 +65,43 @@ def test_regime_success(bot_module, bot, monkeypatch, closes, result, args, symb
 
 
 @pytest.mark.parametrize("args", [["700", "extra"], ["US.AAPL"], ["bad"]])
-def test_bad_arguments_do_not_fetch(bot_module, bot, monkeypatch, args):
+async def test_bad_arguments_do_not_fetch(bot_module, bot, monkeypatch, args):
     fetch = Mock()
     monkeypatch.setattr(bot_module, "fetch_market_history", fetch)
-    update = SimpleNamespace(message=Mock())
-    bot._regime(update, SimpleNamespace(args=args))
+    update = SimpleNamespace(message=Mock(reply_text=AsyncMock(), reply_photo=AsyncMock()))
+    await bot._regime(update, SimpleNamespace(args=args))
     fetch.assert_not_called()
     update.message.reply_text.assert_called_once()
 
 
 @pytest.mark.parametrize("error", [PriceHistoryError("stale"), RegimeError("fit failed"), RuntimeError("unexpected")])
-def test_failure_replies_and_releases_lock(bot_module, bot, monkeypatch, error):
+async def test_failure_replies_and_releases_lock(bot_module, bot, monkeypatch, error):
     monkeypatch.setattr(bot_module, "fetch_market_history", Mock(side_effect=error))
-    update = SimpleNamespace(message=Mock())
-    bot._regime(update, SimpleNamespace(args=["700"]))
+    update = SimpleNamespace(message=Mock(reply_text=AsyncMock(), reply_photo=AsyncMock()))
+    await bot._regime(update, SimpleNamespace(args=["700"]))
     update.message.reply_text.assert_called_once()
     update.message.reply_photo.assert_not_called()
     assert bot._regime_lock.acquire(blocking=False)
     bot._regime_lock.release()
 
 
-def test_busy_report_is_bounded(bot_module, bot, monkeypatch):
+async def test_busy_report_is_bounded(bot_module, bot, monkeypatch):
     fetch = Mock()
     monkeypatch.setattr(bot_module, "fetch_market_history", fetch)
     bot._regime_lock.acquire()
-    update = SimpleNamespace(message=Mock())
-    bot._regime(update, SimpleNamespace(args=[]))
+    update = SimpleNamespace(message=Mock(reply_text=AsyncMock(), reply_photo=AsyncMock()))
+    await bot._regime(update, SimpleNamespace(args=[]))
     fetch.assert_not_called()
     assert "running" in update.message.reply_text.call_args.args[0]
     bot._regime_lock.release()
 
 
 def test_command_registered_as_background_handler(bot):
-    bot.updater = Mock()
+    bot.application = Mock()
     bot.run()
-    handlers = [call.args[0] for call in bot.updater.dispatcher.add_handler.call_args_list]
-    handler = next(h for h in handlers if getattr(h, "command", None) == "regime")
-    assert handler.run_async is True
+    handlers = [call.args[0] for call in bot.application.add_handler.call_args_list]
+    handler = next(h for h in handlers if "regime" in getattr(h, "commands", set()))
+    assert handler.block is False
     assert handler.callback == bot._regime
 
 
@@ -146,14 +130,14 @@ def volume_bars(closes):
     return pd.DataFrame(rows, index=pd.DatetimeIndex(dates), columns=["close", "volume"])
 
 
-def test_volume_profile_integrated(bot_module, bot, monkeypatch, closes, result):
+async def test_volume_profile_integrated(bot_module, bot, monkeypatch, closes, result):
     bars = volume_bars(closes)
     fetch = Mock(return_value=PriceHistory(closes, bars, None))
     monkeypatch.setattr(bot_module, "fetch_market_history", fetch)
     monkeypatch.setattr(bot_module, "analyze_regime", Mock(return_value=result))
     bot._financial_data_bot__config = {"regime_volume": {"mode": "cumulative", "sessions": 60}}
-    update = SimpleNamespace(message=Mock())
-    bot._regime(update, SimpleNamespace(args=["700"]))
+    update = SimpleNamespace(message=Mock(reply_text=AsyncMock(), reply_photo=AsyncMock()))
+    await bot._regime(update, SimpleNamespace(args=["700"]))
     reply = update.message.reply_photo.call_args.kwargs
     assert "POC" in reply["caption"]
     assert "Daily cumulative volume differenced" in reply["caption"]
@@ -163,12 +147,12 @@ def test_volume_profile_integrated(bot_module, bot, monkeypatch, closes, result)
         image.verify()
 
 
-def test_profile_failure_keeps_regime(bot_module, bot, monkeypatch, closes, result):
+async def test_profile_failure_keeps_regime(bot_module, bot, monkeypatch, closes, result):
     monkeypatch.setattr(bot_module, "fetch_market_history", Mock(return_value=PriceHistory(closes, volume_bars(closes), None)))
     monkeypatch.setattr(bot_module, "analyze_regime", Mock(return_value=result))
     monkeypatch.setattr(bot_module, "analyze_volume_profile", Mock(side_effect=VolumeProfileError("Volume is too concentrated.")))
-    update = SimpleNamespace(message=Mock())
-    bot._regime(update, SimpleNamespace(args=["700"]))
+    update = SimpleNamespace(message=Mock(reply_text=AsyncMock(), reply_photo=AsyncMock()))
+    await bot._regime(update, SimpleNamespace(args=["700"]))
     caption = update.message.reply_photo.call_args.kwargs["caption"]
     assert "Bull/Bear ratio" in caption
     assert "Volume profile unavailable: Volume is too concentrated." in caption

@@ -41,7 +41,7 @@ class data_service:
             "month": month,
             "start": start,
             "end": end,
-        })
+        }, timeout=(5, 30))
         if res.status_code == 200:
             return pd.DataFrame(res.json()['data'])
 
@@ -50,7 +50,7 @@ class data_service:
             "month": month,
             "start": start,
             "end": end,
-        })
+        }, timeout=(5, 30))
         if res.status_code == 200:
             return pd.DataFrame(res.json()['data'])
 
@@ -67,7 +67,7 @@ class data_service:
             "events": 1
         }
         param['symbols']= ticker
-        res = requests.get(self.__cnbc_api,param)
+        res = requests.get(self.__cnbc_api,param, timeout=(5, 30))
         if res.status_code ==200:
             return (ticker,res.json())
         else:

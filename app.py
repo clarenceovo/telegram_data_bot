@@ -1,4 +1,5 @@
 import logging
+import asyncio
 import json
 import io
 import os
@@ -6,28 +7,27 @@ import threading
 import time
 import pandas as pd
 import seaborn as sns
-import warnings
-warnings.simplefilter(action='ignore', category=FutureWarning)
-from fractions import Fraction
 from api_data_service.api import data_service
 from api_data_service.AnalyticAPIClient import AnalyticAPIClient
 from api_data_service.price_history import fetch_market_history, normalize_hk_symbol, PriceHistoryError
 from analytics.regime import analyze_regime, RegimeError
 from analytics.regime_report import render_regime_report
 from analytics.volume_profile import analyze_volume_profile, VolumeProfileError
+from recommendation_service import recommendation_message
 from datetime import datetime , date,timedelta , date
 import matplotlib
 import sys
-import matplotlib.pyplot as plt
 matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 matplotlib.style.use('ggplot')
 import requests
-from telegram import Update, ForceReply
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 class financial_data_bot:
     def __init__(self,args):
@@ -41,13 +41,14 @@ class financial_data_bot:
             logger.info("Loaded configuration successfully")
         if "ENVIRONMENT"  in os.environ.keys() and os.environ["ENVIRONMENT"] == "UAT":
             logger.info("BOT ENV:UAT")
-            self.updater = Updater(self.__config['telegram_token_uat'])
+            token = self.__config['telegram_token_uat']
         else:
-            self.updater = Updater(self.__config['telegram_token_prod'])
+            token = self.__config['telegram_token_prod']
             logger.info("BOT ENV:PROD")
+        self.application = Application.builder().token(token).build()
 
 
-    def _get_fx_cross(self, update: Update, context: CallbackContext) -> None:
+    async def _get_fx_cross(self, update: Update, context: CallbackContext) -> None:
         name_mapping = {
             "HKD=":"USD/HKD",
             "EUR=":"EUR/USD",
@@ -72,7 +73,7 @@ class financial_data_bot:
         }
         self.__on_trigger(update)
         data_dict = {}
-        res = self.__data_service.get_fx()
+        res = await asyncio.to_thread(self.__data_service.get_fx)
         for symbol ,item in res:
             data_dict[symbol]=[item.update_time,item.open,item.high,item.low,item.last,item.prev_close]
         df = pd.DataFrame.from_dict(data_dict,orient='index')
@@ -89,14 +90,14 @@ class financial_data_bot:
         ret=ret[['LAST','change']]
         msg = "   PAIR       Current   Change%\n"
         msg += ret.to_string(index=True, header=False)
-        update.message.reply_text(msg)
+        await update.message.reply_text(msg)
         #return
 
-    def _get_yield_curve_chart(self, update: Update, context: CallbackContext) -> None:
+    async def _get_yield_curve_chart(self, update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
         buffer = io.BytesIO()
         custom_dict = {"US3M":0,"US6M":1,"US9M":2,'US1Y': 3, 'US2Y': 4, 'US5Y': 5,'US10Y':6,"US20Y":7,"US30Y":8}
-        res = self.__data_service.get_yield()
+        res = await asyncio.to_thread(self.__data_service.get_yield)
         data_dict = {}
         for symbol ,item in res:
             data_dict[symbol]=[item.update_time,item.open,item.high,item.low,item.last,item.prev_close]
@@ -130,12 +131,11 @@ class financial_data_bot:
         msg+=\
 f"""\n___________________
 10Y-2Y Spread: {round(yield_spread,4)}"""
-        update.message.reply_photo(photo=buffer.getvalue(), caption=msg)
-        plt.close(fig=plt.get_fignums().pop())
-        #update.message.reply_text(ret.to_string(index=True))
+        await update.message.reply_photo(photo=buffer.getvalue(), caption=msg)
+        #await update.message.reply_text(ret.to_string(index=True))
 
         return
-    def _help(self, update: Update, context: CallbackContext) -> None:
+    async def _help(self, update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
         msg = """Command :
 /hkshortvol <ticker> <session> 
@@ -171,8 +171,12 @@ Get HSI Future Option OI Change and settle price
 One-year closing-price chart and bull/bear mean-return probabilities
 with an approximate 95% bootstrap interval for their ratio.
 Includes volume profile and candidate support/resistance zones (60 sessions by default).
+
+/recommend [index]
+Cached long-only, five-session index research ideas.
+Watchlist: HSI, N225, NDX, SPX, DJI. Example: /recommend SPX
         """
-        update.message.reply_text(msg)
+        await update.message.reply_text(msg)
     def __get_contract_month(self):
         current = datetime.now()
         forward = datetime.now() + timedelta(days=28)
@@ -195,7 +199,7 @@ Includes volume profile and candidate support/resistance zones (60 sessions by d
         return max if max % 100 == 0 else max + 100 - max % 100
 
 
-    def _get_index_option_oi(self,update: Update, context: CallbackContext) -> None:
+    async def _get_index_option_oi(self,update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
         buffer = io.BytesIO()
         cmd = update.message.text.split("/indexoi")[1].split(' ')
@@ -214,7 +218,7 @@ Includes volume profile and candidate support/resistance zones (60 sessions by d
         end_str = end.strftime("%Y-%m-%d")
         start_str = end - timedelta(days=7)
         start_str = start_str.strftime("%Y-%m-%d")
-        ret = self.__data_service.get_index_future_oi(month=month,start=start_str,end=end_str)
+        ret = await asyncio.to_thread(self.__data_service.get_index_future_oi, month=month,start=start_str,end=end_str)
         last_record_date = ret['date'].max()  # last record date
         ret = ret.query(f'date =="{last_record_date}"')
         chart_df = ret.copy()
@@ -236,7 +240,7 @@ Includes volume profile and candidate support/resistance zones (60 sessions by d
         plt.suptitle(f"Open Interest@{last_record_date} Option Month:{month[:7]}", size=12)
         plt.savefig(buffer, format='jpeg')
 
-        #update.message.reply_photo(photo=buffer.getvalue(), caption=ret)
+        #await update.message.reply_photo(photo=buffer.getvalue(), caption=ret)
         plt.close(fig=plt.get_fignums().pop())
         ret['oi_delta_abs'] = ret.apply(lambda x: abs(int(x['oi_change'])), axis=1)
         call_df = ret.query("type == 'C'")
@@ -264,18 +268,18 @@ OI Change
 CALL : {oi_change_call}
 PUT : {oi_change_put}
 """
-        update.message.reply_text(ret)
-        #update.message.reply_photo(photo=buffer.getvalue(), caption=ret)
+        await update.message.reply_text(ret)
+        #await update.message.reply_photo(photo=buffer.getvalue(), caption=ret)
         return
 
 
-    def _get_stock_option_oi(self,update: Update, context: CallbackContext) -> None:
+    async def _get_stock_option_oi(self,update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
         buffer = io.BytesIO()
         cmd = update.message.text.split("/hkstockoi")[1].split(' ')
         cmd.remove('')
         if len(cmd)==0:
-            update.message.reply_text("Wrong Command Parameter. Please input the ticker")
+            await update.message.reply_text("Wrong Command Parameter. Please input the ticker")
             return
         ticker = cmd[0]
         if len(cmd)>1:
@@ -292,7 +296,7 @@ PUT : {oi_change_put}
             end_str = end.strftime("%Y-%m-%d")
             start_str =  end - timedelta(days=7)
             start_str=start_str.strftime("%Y-%m-%d")
-            ret = self.__data_service.get_stock_option_oi_by_ticker(ticker=ticker,month=month,start=start_str,end=end_str)
+            ret = await asyncio.to_thread(self.__data_service.get_stock_option_oi_by_ticker, ticker=ticker,month=month,start=start_str,end=end_str)
             last_record_date = ret['date'].max() #last record date
             ret = ret.query(f'date =="{last_record_date}"')
             chart_df = ret.copy()
@@ -336,12 +340,11 @@ PUT  OI
 -----------
 {put_ret.to_string(index=False,header=True,col_space=8)}
 """
-            update.message.reply_photo(photo=buffer.getvalue(), caption=ret)
-            plt.close(fig=plt.get_fignums().pop())
+            await update.message.reply_photo(photo=buffer.getvalue(), caption=ret)
 
 
 
-    def _get_crypto_open_interest(self,update: Update, context: CallbackContext) -> None:
+    async def _get_crypto_open_interest(self,update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
         cmd = update.message.text.split("/cryptooi")[1].split(' ')
         if len(cmd)==0:
@@ -355,15 +358,15 @@ PUT  OI
         start =datetime.now() + timedelta(hours=8)-timedelta(days=14)
         start =start.strftime('%Y-%m-%d')
         if ticker is not None:
-            ret = requests.get(self.__api + "/crypto/customTimeRangeOpenInterest", params={
+            ret = await asyncio.to_thread(requests.get, self.__api + "/crypto/customTimeRangeOpenInterest", params={
                 "ticker": ticker,
                 "exchange": 'FTX',
                 "start":start,
                 "end":end
-            })
+            }, timeout=(5, 30))
             if ret.status_code == 200:
                 if len(ret.json()['data'])==0:
-                    update.message.reply_text("Wrong Ticker Parameter")
+                    await update.message.reply_text("Wrong Ticker Parameter")
                     return
                 data = pd.DataFrame(ret.json()['data'])
                 data=data[['datetime','price','open_interest']]
@@ -380,13 +383,13 @@ PUT  OI
                 plt.title(f'{ticker} OI@{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
                 plt.savefig(buffer,format='jpeg')
                 plt.close(fig=plt.get_fignums().pop())
-                update.message.reply_photo(photo=buffer.getvalue())
+                await update.message.reply_photo(photo=buffer.getvalue())
                 buffer.close()
 
-    def hk_bull_bear(self,update: Update, context: CallbackContext) -> None:
+    async def hk_bull_bear(self,update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
         buffer = io.BytesIO()
-        res = requests.get(f'https://www.bnppwarrant.com/tc/data/json/cbbc-band-json-all/ucode/HSI/step/15/spread/100/')
+        res = await asyncio.to_thread(requests.get, f'https://www.bnppwarrant.com/tc/data/json/cbbc-band-json-all/ucode/HSI/step/15/spread/100/', timeout=(5, 30))
         ret = res.json()
         bull_bear_data = ret['mainData']
         bull = pd.DataFrame(list(filter(lambda x: x["ty"]=='bull', bull_bear_data)))
@@ -414,7 +417,7 @@ Update Time :{ref_date}
 Mark Price:{ref_price}
         
         """
-        update.message.reply_photo(photo=buffer.getvalue(),caption=msg)
+        await update.message.reply_photo(photo=buffer.getvalue(),caption=msg)
         plt.close(fig=plt.get_fignums().pop())
 
 
@@ -422,10 +425,10 @@ Mark Price:{ref_price}
 
 
 
-    def _get_hsi_future_open_interest(self,update: Update, context: CallbackContext) -> None:
+    async def _get_hsi_future_open_interest(self,update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
         buffer = io.BytesIO()
-        ret = requests.get(self.__api + "/equity/HK/getHSIFutureOI")
+        ret = await asyncio.to_thread(requests.get, self.__api + "/equity/HK/getHSIFutureOI", timeout=(5, 30))
         if ret.status_code == 200:
             data = pd.DataFrame(ret.json()['data'])
             data['date'] = pd.to_datetime(data['date']).dt.date
@@ -451,12 +454,12 @@ Mark Price:{ref_price}
                       f'      Date       Price    Change  OI Change\n' \
                       f'{ret.to_string(index=False,header=False)}'
 
-            update.message.reply_photo(photo=buffer.getvalue(),caption=ret_str)
+            await update.message.reply_photo(photo=buffer.getvalue(),caption=ret_str)
             plt.close(fig=plt.get_fignums().pop())
-            #update.message.reply_text(ret.to_string(index=False))
+            #await update.message.reply_text(ret.to_string(index=False))
 
 
-    def _get_HK_open_interest(self,update: Update, context: CallbackContext) -> None:
+    async def _get_HK_open_interest(self,update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
         buffer = io.BytesIO()
         """
@@ -480,10 +483,10 @@ Mark Price:{ref_price}
             session = 'PM'
 
         if ticker is not None and session is not None:
-            ret = requests.get(self.__api+"/equity/HK/getShortSellingByTicker",params={
+            ret = await asyncio.to_thread(requests.get, self.__api+"/equity/HK/getShortSellingByTicker",params={
                 "ticker":ticker,
                 "session":session
-            })
+            }, timeout=(5, 30))
             if ret.status_code == 200:
                 data = pd.DataFrame(ret.json()['data'])
                 data['date'] = pd.to_datetime(data['date']).dt.date
@@ -504,14 +507,14 @@ Mark Price:{ref_price}
                 ret_df['shares']= ret_df.apply(lambda x:' '+f"{x['shares']:,}"+' ',axis=1)
                 ret_df.columns=[' Date  ',"Shares ",'Turnover($HKD)']
                 ret_text = ret_df.to_string(index=False)
-                #update.message.reply_text(ret_text)
-                update.message.reply_photo(photo=buffer.getvalue(),caption=ret_text)
+                #await update.message.reply_text(ret_text)
+                await update.message.reply_photo(photo=buffer.getvalue(),caption=ret_text)
                 buffer.close()
         else:
-            update.message.reply_text("Wrong Command Parameter")
+            await update.message.reply_text("Wrong Command Parameter")
 
 
-    def _volume_profile(self,update: Update, context: CallbackContext) -> None:
+    async def _volume_profile(self,update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
         idx = 0
         buffer = io.BytesIO()
@@ -532,11 +535,11 @@ Mark Price:{ref_price}
                 end = cmd[3]
         else:
             return None
-        ret = requests.get(self.__api + "/equity/getTickerHistData", params={
+        ret = await asyncio.to_thread(requests.get, self.__api + "/equity/getTickerHistData", params={
             "ticker": quote,
             "startDate": start,
             "endDate": end
-        })
+        }, timeout=(5, 30))
         if ret.status_code == 200:
             df = pd.json_normalize(ret.json()['data'])
             df['time'] = pd.to_datetime(df['time'], errors='coerce')
@@ -572,36 +575,36 @@ Mark Price:{ref_price}
             message =f"""
                     Ticker:{quote}\nRange : {start} - {TODAY.strftime('%Y-%m-%d')}\nLast Update Time: {df.iloc[-1].name.strftime('%Y-%m-%d %H:%M:%S')}
                     """
-            update.message.reply_photo(photo=buffer.getvalue(), caption=message)
+            await update.message.reply_photo(photo=buffer.getvalue(), caption=message)
             buffer.close()
 
-    def _regime(self, update: Update, context: CallbackContext) -> None:
+    async def _regime(self, update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
         if len(context.args) > 1:
-            update.message.reply_text("Usage: /regime [ticker], e.g. /regime 700")
+            await update.message.reply_text("Usage: /regime [ticker], e.g. /regime 700")
             return
         try:
             symbol = normalize_hk_symbol(context.args[0] if context.args else "HK.HSImain")
         except PriceHistoryError as exc:
-            update.message.reply_text(str(exc))
+            await update.message.reply_text(str(exc))
             return
         if not self._regime_lock.acquire(blocking=False):
-            update.message.reply_text("A regime report is running. Please try again shortly.")
+            await update.message.reply_text("A regime report is running. Please try again shortly.")
             return
         started = time.monotonic()
         try:
             now = pd.Timestamp.now(tz="Asia/Hong_Kong")
             volume_config = self.__config.get("regime_volume", {})
             volume_mode = volume_config.get("mode", "per_bar")
-            history = fetch_market_history(self.__api, symbol, now=now, volume_mode=volume_mode)
+            history = await asyncio.to_thread(fetch_market_history, self.__api, symbol, now=now, volume_mode=volume_mode)
             closes = history.closes
-            result = analyze_regime(closes)
+            result = await asyncio.to_thread(analyze_regime, closes)
             profile = None
             volume_error = history.volume_error
             if volume_error is None:
                 try:
-                    profile = analyze_volume_profile(
-                        history.bars, lookback_sessions=volume_config.get("sessions", 60),
+                    profile = await asyncio.to_thread(
+                        analyze_volume_profile, history.bars, lookback_sessions=volume_config.get("sessions", 60),
                         bins=volume_config.get("bins", 48), bandwidth=volume_config.get("bandwidth", 0.2),
                         prominence=volume_config.get("prominence", 0.1))
                 except VolumeProfileError as exc:
@@ -609,29 +612,42 @@ Mark Price:{ref_price}
             photo, caption = render_regime_report(
                 symbol, closes, result, now=now, profile=profile,
                 volume_error=volume_error, volume_mode=volume_mode)
-            update.message.reply_photo(photo=photo, caption=caption)
+            await update.message.reply_photo(photo=photo, caption=caption)
             if volume_error:
                 logger.warning("Regime volume profile omitted for %s: %s", symbol, volume_error)
             logger.info("Regime report %s: %d closes, %d/%d bootstrap fits, %.2fs",
                         symbol, len(closes), result.bootstrap_successes,
                         result.bootstrap_samples, time.monotonic() - started)
         except (PriceHistoryError, RegimeError) as exc:
-            update.message.reply_text("Cannot build regime report: " + str(exc))
+            await update.message.reply_text("Cannot build regime report: " + str(exc))
         except Exception:
             logger.exception("Regime report failed for %s", symbol)
-            update.message.reply_text("The regime report could not be completed. Please try again later.")
+            await update.message.reply_text("The regime report could not be completed. Please try again later.")
         finally:
             self._regime_lock.release()
 
-    def instrument_signal(self,update: Update, context: CallbackContext) -> None:
+    async def _recommend(self, update: Update, context: CallbackContext) -> None:
+        self.__on_trigger(update)
+        if len(context.args) > 1:
+            await update.message.reply_text("Usage: /recommend [HSI|N225|NDX|SPX|DJI]")
+            return
+        try:
+            message = await asyncio.to_thread(recommendation_message, context.args[0] if context.args else None)
+        except Exception:
+            logger.exception("Recommendation cache could not be read")
+            message = "Recommendations are unavailable. Check the signal runner and its configuration."
+        for start in range(0, len(message), 3900):
+            await update.message.reply_text(message[start:start + 3900])
+
+    async def instrument_signal(self,update: Update, context: CallbackContext) -> None:
         self.__on_trigger(update)
         cmd = update.message.text.split("/signal")[1].split(' ')
         if len(cmd)==0:
-            update.message.reply_text("Wrong Command Parameter")
+            await update.message.reply_text("Wrong Command Parameter")
             return
         ticker = cmd[1]
         if ticker:
-            df = self.analytic_client.get_instrument_signal(ticker)
+            df = await asyncio.to_thread(self.analytic_client.get_instrument_signal, ticker)
             if df is not None:
                 msg = ""
                 msg += f"Signal Analysis for {ticker}\n"
@@ -643,8 +659,8 @@ Mark Price:{ref_price}
                 msg += f'Amplitude: {round(df["high"].iloc[-1] - df["low"].iloc[-1], 2)}\n'
                 msg += f'Percentage Ret: {round(df["ret"].iloc[-1] * 100, 2)}%\n'
                 msg += f"ADX: {round(df['adx'].iloc[-1], 2)}| Up:{round(df['dmi_plus'].iloc[-1], 2)}| Down:{round(df['dmi_minus'].iloc[-1], 2)}\n"
-                msg += f'1Month Vol: {round(df["vol_1m"][-1] * 100, 4)}\n'
-                msg += f'3Month Vol: {round(df["vol_3m"][-1] * 100, 4)}\n'
+                msg += f'1Month Vol: {round(df["vol_1m"].iloc[-1] * 100, 4)}\n'
+                msg += f'3Month Vol: {round(df["vol_3m"].iloc[-1] * 100, 4)}\n'
                 msg += f"ZScore Plus 1: {round(df['zscore_plus_1'].iloc[-1], 2)}\n"
                 msg += f"ZScore Plus 2: {round(df['zscore_plus_2'].iloc[-1], 2)}\n"
                 msg += f"ZScore Plus 3: {round(df['zscore_plus_3'].iloc[-1], 2)}\n"
@@ -654,39 +670,45 @@ Mark Price:{ref_price}
                 msg += f"Overbought Ceiling: {round(df['overbought_ceiling'].iloc[-1], 2)}\n"
                 msg += f"Oversold Ceiling: {round(df['oversold_ceiling'].iloc[-1], 2)}\n"
                 msg += "\n\n"
-                update.message.reply_text(msg)
+                await update.message.reply_text(msg)
 
         else:
-            update.message.reply_text("Wrong Command Parameter")
+            await update.message.reply_text("Wrong Command Parameter")
             return
 
     def run(self):
         logger.info(f"Bot starts at:{datetime.now().strftime('%Y/%m/%d %H:%M:%S')}")
-        self.dispatcher = self.updater.dispatcher
-        self.dispatcher.add_handler(CommandHandler("fx", self._get_fx_cross))
-        self.dispatcher.add_handler(CommandHandler("yield", self._get_yield_curve_chart))
-        self.dispatcher.add_handler(CommandHandler("hkstockoi", self._get_stock_option_oi))
-        self.dispatcher.add_handler(CommandHandler("hkshortvol", self._get_HK_open_interest))
-        self.dispatcher.add_handler(CommandHandler("cryptooi", self._get_crypto_open_interest))
-        self.dispatcher.add_handler(CommandHandler("hsioi", self._get_hsi_future_open_interest))
-        self.dispatcher.add_handler(CommandHandler("indexoi", self._get_index_option_oi))
-        self.dispatcher.add_handler(CommandHandler("help", self._help))
-        self.dispatcher.add_handler(CommandHandler("volprofile", self._volume_profile))
-        self.dispatcher.add_handler(CommandHandler("hkbull", self.hk_bull_bear))
-        self.dispatcher.add_handler(CommandHandler("signal", self.instrument_signal))
-        self.dispatcher.add_handler(CommandHandler("regime", self._regime, run_async=True))
-        self.dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, self._general_query))
+        self.application.add_handler(CommandHandler("fx", self._get_fx_cross))
+        self.application.add_handler(CommandHandler("yield", self._get_yield_curve_chart))
+        self.application.add_handler(CommandHandler("hkstockoi", self._get_stock_option_oi))
+        self.application.add_handler(CommandHandler("hkshortvol", self._get_HK_open_interest))
+        self.application.add_handler(CommandHandler("cryptooi", self._get_crypto_open_interest))
+        self.application.add_handler(CommandHandler("hsioi", self._get_hsi_future_open_interest))
+        self.application.add_handler(CommandHandler("indexoi", self._get_index_option_oi))
+        self.application.add_handler(CommandHandler("help", self._help))
+        self.application.add_handler(CommandHandler("volprofile", self._volume_profile))
+        self.application.add_handler(CommandHandler("hkbull", self.hk_bull_bear))
+        self.application.add_handler(CommandHandler("signal", self.instrument_signal))
+        self.application.add_handler(CommandHandler("regime", self._regime, block=False))
+        self.application.add_handler(CommandHandler("recommend", self._recommend))
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._general_query))
         #logger.info(f"Bot starts at:{datetime.now().strftime('%Y/%m/%d %H:%M:%S')}")
-        self.updater.start_polling()
+        # Python 3.14 no longer creates an implicit main-thread event loop.
+        with asyncio.Runner() as runner:
+            asyncio.set_event_loop(runner.get_loop())
+            try:
+                self.application.run_polling(close_loop=False)
+            finally:
+                asyncio.set_event_loop(None)
 
-    def _general_query(self,update: Update, context: CallbackContext) -> None:
+    async def _general_query(self,update: Update, context: CallbackContext) -> None:
         msg = update.message.text
         if "萬里長城長又長" in msg:
             self.__on_trigger(update)
-            update.message.reply_text("我的尾水比他長🙏🏻")
+            await update.message.reply_text("我的尾水比他長🙏🏻")
         if  any(item in msg for item in ["條女","解脫","放下","執著","抑鬱","忘記","多情","放得低","放低"]) and update.message.from_user.id == 1005293427:
             self.__on_trigger(update)
-            update.message.reply_text("夠鐘去喊啦!🙏🏻")
+            await update.message.reply_text("夠鐘去喊啦!🙏🏻")
 
 if __name__ == '__main__':
     bot = financial_data_bot(sys.argv[1:])
